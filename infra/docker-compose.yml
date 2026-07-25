@@ -1,0 +1,53 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    image: mayo-pizza:latest
+    expose:
+      - "3000"
+    environment:
+      HOST: ${HOST:-0.0.0.0}
+      PORT: "3000"
+      NODE_ENV: ${NODE_ENV:-production}
+      WEB_ROOT: ${WEB_ROOT:-/app/web-dist}
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:-mayo.pizza}
+      STUN_HOST: ${STUN_HOST:-mayo.pizza}
+      TURN_HOST: ${TURN_HOST:-mayo.pizza}
+      STUN_PORT: ${STUN_PORT:-3478}
+      TURN_PORT: ${TURN_PORT:-3478}
+      TURNS_PORT: ${TURNS_PORT:-5349}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1,::1}
+      TURN_STATIC_SECRET: ${TURN_STATIC_SECRET:?TURN_STATIC_SECRET must be set}
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  coturn:
+    image: coturn/coturn:4.6.2
+    network_mode: host
+    environment:
+      TURN_STATIC_SECRET: ${TURN_STATIC_SECRET:?TURN_STATIC_SECRET must be set}
+    command:
+      - turnserver
+      - -c
+      - /etc/coturn/turnserver.conf
+      - "--static-auth-secret=${TURN_STATIC_SECRET:?TURN_STATIC_SECRET must be set}"
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
