@@ -1,0 +1,10 @@
+:root {
+  --mp-cream: #fdfcf0;
+  --mp-olive: #3d4821;
+  --mp-gold: #f8a04d;
+  --mp-red: #e31c2c;
+  --mp-purple: #8f54f9;
+  --mp-font-display: "Poiret One", serif;
+  --mp-font-body: "Rubik", system-ui, sans-serif;
+  --mp-font-mono: ui-monospace, "SF Mono", monospace;
+}

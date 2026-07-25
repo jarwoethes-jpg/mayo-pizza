@@ -1,0 +1,13 @@
+@import "tailwindcss";
+@import "./theme/tokens.css";
+
+:root {
+  background: var(--mp-cream);
+  color: var(--mp-olive);
+  font-family: var(--mp-font-body);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
