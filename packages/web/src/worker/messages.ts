@@ -45,7 +45,15 @@ export type ReceiverWorkerCommand =
       buffer: ArrayBuffer;
     }
   | {
+      t: "commit";
+      chunkId: string;
+    }
+  | {
       t: "finish";
+    }
+  | {
+      t: "sink-error";
+      message: string;
     }
   | {
       t: "cancel";
@@ -57,6 +65,13 @@ export type ReceiverWorkerEvent =
       bytesDone: number;
       totalBytes: number;
       bytesPerSec: number;
+    }
+  | {
+      t: "chunk";
+      chunkId: string;
+      buffer: ArrayBuffer;
+      bytesDone: number;
+      totalBytes: number;
     }
   | {
       t: "ack";

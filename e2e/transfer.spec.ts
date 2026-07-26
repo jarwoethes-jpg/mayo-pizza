@@ -294,6 +294,7 @@ test.describe("single-file transfer", () => {
           window.__MAYO_SIGNALING_URL__ = url;
           window.__MAYO_FORCE_RELAY__ = shouldForceRelay;
           window.__MAYO_CORRUPT_FRAME__ = corrupt;
+          window.__MAYO_SINK__ = "null";
         },
         { corrupt: false, forceRelay, url: signalingUrl },
       );
@@ -388,6 +389,7 @@ test.describe("single-file transfer", () => {
         window.__MAYO_SIGNALING_URL__ = url;
         window.__MAYO_FORCE_RELAY__ = shouldForceRelay;
         window.__MAYO_CORRUPT_FRAME__ = true;
+        window.__MAYO_SINK__ = "null";
       },
       { forceRelay, url: signalingUrl },
     );
@@ -396,6 +398,7 @@ test.describe("single-file transfer", () => {
         window.__MAYO_SIGNALING_URL__ = url;
         window.__MAYO_FORCE_RELAY__ = shouldForceRelay;
         window.__MAYO_CORRUPT_FRAME__ = false;
+        window.__MAYO_SINK__ = "null";
       },
       { forceRelay, url: signalingUrl },
     );

@@ -1,4 +1,5 @@
 import type { TransferMessage } from "shared";
+import { createSink, type Sink, type SinkFactory, SinkManager } from "../sink";
 import type {
   ReceiverWorkerCommand,
   ReceiverWorkerEvent,
@@ -29,7 +30,10 @@ export interface TransferResult {
   expectedSha256?: string;
 }
 
+export type TransferManifestInfo = Extract<TransferMessage, { t: "manifest" }>;
+
 export interface TransferControllerOptions {
+  onManifest?: (manifestInfo: TransferManifestInfo) => void;
   onProgress?: (progress: TransferProgress) => void;
   onResult?: (result: TransferResult) => void;
   onError?: (error: Error) => void;
@@ -46,6 +50,7 @@ export interface TransferControllerOptions {
     ReceiverWorkerCommand,
     ReceiverWorkerEvent
   >;
+  sinkFactory?: SinkFactory;
 }
 
 export interface WorkerLike<Command, Event> {
@@ -304,10 +309,17 @@ export class TransferController {
   private senderLastSlice = false;
   private senderSha256 = "";
   private senderDoneSent = false;
+  private senderAckedBytes = 0;
+  private senderWaitingForAck = false;
+  private senderSliceDrained = false;
   private receiverTotalBytes = 0;
   private receiverForwardedBytes = 0;
+  private receiverSinkForwardedBytes = 0;
   private receiverStarted = false;
   private receiverFinishRequested = false;
+  private receiverSinkManager: SinkManager | undefined;
+  private receiverManifest: TransferManifestInfo | undefined;
+  private receiverAcceptPending = false;
   private receiverDoneMessage:
     | Extract<TransferMessage, { t: "done" }>
     | undefined;
@@ -370,6 +382,9 @@ export class TransferController {
     this.senderLastSlice = false;
     this.senderSha256 = "";
     this.senderDoneSent = false;
+    this.senderAckedBytes = 0;
+    this.senderWaitingForAck = false;
+    this.senderSliceDrained = false;
     this.sendCtrl({
       t: "manifest",
       transferId,
@@ -394,6 +409,70 @@ export class TransferController {
       this.trySendCtrl({ t: "cancel", reason });
     }
     this.destroy();
+    this.options.onCancelled?.(reason);
+  }
+
+  /** Accepts the current manifest and starts sink creation from the caller's gesture. */
+  public acceptTransfer(): void {
+    if (
+      this.role !== "downloader" ||
+      this.transferId === undefined ||
+      this.receiverSinkManager !== undefined ||
+      this.receiverAcceptPending
+    ) {
+      return;
+    }
+    const transferId = this.transferId;
+    const manifest = this.receiverManifest;
+    if (manifest === undefined) {
+      return;
+    }
+    this.receiverAcceptPending = true;
+    let sinkResult: Sink | Promise<Sink>;
+    try {
+      // Do not move this call below an await: FSA needs the original click gesture.
+      sinkResult = createSink(
+        manifest.suggestedName,
+        manifest.totalBytes,
+        this.options.sinkFactory,
+      );
+    } catch (error) {
+      this.fail(
+        this.errorMessage(error, "Could not prepare the download sink."),
+      );
+      return;
+    }
+    void Promise.resolve(sinkResult)
+      .then((sink) => {
+        if (this.destroyed || this.transferId !== transferId) {
+          void Promise.resolve(
+            sink.cancel("The transfer is no longer active."),
+          ).catch(() => undefined);
+          return;
+        }
+        this.receiverAcceptPending = false;
+        this.receiverSinkManager = new SinkManager(sink);
+        this.sendCtrl({
+          t: "request",
+          transferId,
+          offset: 0,
+        });
+      })
+      .catch((error: unknown) => {
+        this.receiverAcceptPending = false;
+        this.fail(
+          this.errorMessage(error, "Could not prepare the download sink."),
+        );
+      });
+  }
+
+  /** Rejects the current manifest while leaving the peer available for another transfer. */
+  public rejectTransfer(reason = "The receiver rejected the transfer."): void {
+    if (this.role !== "downloader" || this.transferId === undefined) {
+      return;
+    }
+    this.trySendCtrl({ t: "cancel", reason });
+    this.teardownActiveTransfer();
     this.options.onCancelled?.(reason);
   }
 
@@ -427,6 +506,7 @@ export class TransferController {
     }
     this.teardownActiveTransfer();
     this.transferId = message.transferId;
+    this.receiverManifest = message;
     this.receiverTotalBytes = message.totalBytes;
     this.receiverForwardedBytes = 0;
     this.receiverStarted = false;
@@ -439,11 +519,13 @@ export class TransferController {
       offset: 0,
       totalBytes: message.totalBytes,
     });
-    this.sendCtrl({
-      t: "request",
-      transferId: message.transferId,
-      offset: 0,
-    });
+    try {
+      this.options.onManifest?.(message);
+    } catch (error) {
+      this.fail(
+        this.errorMessage(error, "Could not handle the transfer manifest."),
+      );
+    }
   }
 
   private handleRequest(
@@ -469,9 +551,11 @@ export class TransferController {
       frameSize: Math.min(FRAME_SIZE, this.peer.maxMessageSize ?? FRAME_SIZE),
       corruptFirstFrame: isCorruptionRequested(),
       onDrained: () => {
+        this.senderSliceDrained = true;
         if (this.senderLastSlice) {
           this.sendSenderDone();
         } else {
+          this.senderWaitingForAck = true;
           this.requestNextSenderSlice();
         }
       },
@@ -510,6 +594,14 @@ export class TransferController {
 
   private handleAck(message: Extract<TransferMessage, { t: "ack" }>): void {
     if (this.role === "uploader" && this.transferId !== undefined) {
+      this.senderAckedBytes = Math.max(
+        this.senderAckedBytes,
+        message.receivedBytes,
+      );
+      if (this.senderWaitingForAck) {
+        this.senderWaitingForAck = false;
+        this.requestNextSenderSlice();
+      }
       console.debug("[mayo.transfer.ack]", message.receivedBytes);
     }
   }
@@ -550,8 +642,9 @@ export class TransferController {
     const worker = this.options.senderWorkerFactory?.() ?? makeSenderWorker();
     this.senderWorker = worker;
     worker.onmessage = (event) => this.handleSenderWorkerEvent(event.data);
-    worker.onerror = (event) =>
+    worker.onerror = (event) => {
       this.fail(event.message || "Sender worker failed.");
+    };
     return worker;
   }
 
@@ -563,9 +656,14 @@ export class TransferController {
     const worker =
       this.options.receiverWorkerFactory?.() ?? makeReceiverWorker();
     this.receiverWorker = worker;
-    worker.onmessage = (event) => this.handleReceiverWorkerEvent(event.data);
-    worker.onerror = (event) =>
+    worker.onmessage = (event) =>
+      this.handleReceiverWorkerEvent(event.data, worker);
+    worker.onerror = (event) => {
+      if (this.receiverWorker !== worker) {
+        return;
+      }
       this.fail(event.message || "Receiver worker failed.");
+    };
     return worker;
   }
 
@@ -585,6 +683,7 @@ export class TransferController {
     this.senderCursor = event.bytesDone;
     this.senderLastSlice = event.done;
     this.senderSha256 = event.sha256 ?? this.senderSha256;
+    this.senderSliceDrained = false;
     this.reportProgress({
       bytesDone: event.bytesDone,
       totalBytes: event.totalBytes,
@@ -594,8 +693,11 @@ export class TransferController {
     this.senderPump?.push(event.buffer);
   }
 
-  private handleReceiverWorkerEvent(event: ReceiverWorkerEvent): void {
-    if (this.destroyed) {
+  private handleReceiverWorkerEvent(
+    event: ReceiverWorkerEvent,
+    worker: WorkerLike<ReceiverWorkerCommand, ReceiverWorkerEvent>,
+  ): void {
+    if (this.destroyed || this.receiverWorker !== worker) {
       return;
     }
     if (event.t === "error") {
@@ -606,10 +708,58 @@ export class TransferController {
       this.reportProgress({ ...event, side: "receiver" });
       return;
     }
+    if (event.t === "chunk") {
+      const sinkManager = this.receiverSinkManager;
+      const worker = this.receiverWorker;
+      if (sinkManager === undefined || worker === undefined) {
+        this.fail("The receiver sink is not ready.");
+        return;
+      }
+      this.receiverSinkForwardedBytes += event.buffer.byteLength;
+      if (this.receiverSinkForwardedBytes > this.receiverTotalBytes) {
+        this.fail("The receiver worker exceeded the manifest size.");
+        return;
+      }
+      void sinkManager
+        .write(new Uint8Array(event.buffer))
+        .then(() => {
+          if (this.destroyed || this.receiverWorker !== worker) {
+            return;
+          }
+          worker.postMessage({ t: "commit", chunkId: event.chunkId });
+        })
+        .catch((error: unknown) => {
+          if (this.destroyed || this.receiverWorker !== worker) {
+            return;
+          }
+          const message = this.errorMessage(error, "The download sink failed.");
+          try {
+            worker.postMessage({ t: "sink-error", message });
+          } catch {
+            // The worker may already be terminating after the sink failure.
+          }
+          this.fail(message);
+        });
+      this.maybeFinishReceiver();
+      return;
+    }
     if (event.t === "ack") {
       if (this.transferId !== undefined) {
         this.sendCtrl({ t: "ack", receivedBytes: event.receivedBytes });
       }
+      return;
+    }
+    if (event.t !== "done") {
+      this.fail("The receiver worker sent an invalid terminal event.");
+      return;
+    }
+    if (
+      !this.receiverFinishRequested ||
+      !this.receiverStarted ||
+      this.receiverSinkManager === undefined ||
+      this.receiverSinkForwardedBytes < this.receiverTotalBytes
+    ) {
+      this.fail("The receiver worker finished before the sink was drained.");
       return;
     }
     const doneMessage = this.receiverDoneMessage;
@@ -641,10 +791,13 @@ export class TransferController {
     if (
       this.senderWorker === undefined ||
       this.senderReadPending ||
-      this.senderLastSlice
+      this.senderLastSlice ||
+      (this.senderCursor > 0 &&
+        (!this.senderSliceDrained || this.senderAckedBytes < this.senderCursor))
     ) {
       return;
     }
+    this.senderWaitingForAck = false;
     this.senderReadPending = true;
     this.senderWorker.postMessage({ t: "read", offset: this.senderCursor });
   }
@@ -699,14 +852,30 @@ export class TransferController {
     if (
       this.role !== "downloader" ||
       this.receiverWorker === undefined ||
+      this.receiverSinkManager === undefined ||
       this.receiverDoneMessage === undefined ||
+      !this.receiverStarted ||
       this.receiverForwardedBytes < this.receiverTotalBytes ||
+      this.receiverSinkForwardedBytes < this.receiverTotalBytes ||
       this.receiverFinishRequested === true
     ) {
       return;
     }
     this.receiverFinishRequested = true;
-    this.receiverWorker.postMessage({ t: "finish" });
+    const worker = this.receiverWorker;
+    void this.receiverSinkManager
+      .close()
+      .then(() => {
+        if (this.destroyed || this.receiverWorker !== worker) {
+          return;
+        }
+        worker.postMessage({ t: "finish" });
+      })
+      .catch((error: unknown) => {
+        this.fail(
+          this.errorMessage(error, "The download sink failed to close."),
+        );
+      });
   }
 
   private sendCtrl(message: TransferMessage): void {
@@ -756,6 +925,9 @@ export class TransferController {
   }
 
   private fail(message: string, sendRemote = true): void {
+    if (this.destroyed) {
+      return;
+    }
     const error = new Error(message);
     if (sendRemote) {
       this.trySendCtrl({
@@ -769,6 +941,9 @@ export class TransferController {
   }
 
   private teardownActiveTransfer(): void {
+    this.receiverSinkManager?.cancel("Transfer cancelled.");
+    this.receiverSinkManager = undefined;
+    this.receiverAcceptPending = false;
     this.senderPump?.cancel();
     this.senderPump = undefined;
     if (this.senderWorker !== undefined) {
@@ -800,11 +975,22 @@ export class TransferController {
     this.senderLastSlice = false;
     this.senderSha256 = "";
     this.senderDoneSent = false;
+    this.senderAckedBytes = 0;
+    this.senderWaitingForAck = false;
+    this.senderSliceDrained = false;
     this.receiverTotalBytes = 0;
     this.receiverForwardedBytes = 0;
+    this.receiverSinkForwardedBytes = 0;
     this.receiverStarted = false;
     this.receiverFinishRequested = false;
     this.receiverDoneMessage = undefined;
+    this.receiverManifest = undefined;
+  }
+
+  private errorMessage(reason: unknown, fallback: string): string {
+    return reason instanceof Error && reason.message !== ""
+      ? reason.message
+      : fallback;
   }
 }
 

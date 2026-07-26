@@ -4,9 +4,11 @@ import { createPeer, type PeerConnection, type PeerRole } from "./net/peer";
 import { createSignalingClient } from "./net/signaling";
 import {
   createTransferController,
+  type TransferManifestInfo,
   type TransferProgress,
   type TransferResult,
 } from "./net/transfer";
+import { getSinkOverride, getSinkStrategy } from "./sink";
 import "./styles.css";
 
 interface RoomViewProps {
@@ -28,6 +30,9 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
   const [transferResult, setTransferResult] = useState<
     TransferResult | undefined
   >(undefined);
+  const [pendingManifest, setPendingManifest] = useState<
+    TransferManifestInfo | undefined
+  >(undefined);
   const [bufferedAmount, setBufferedAmount] = useState(0);
   const [maxBufferedAmount, setMaxBufferedAmount] = useState(0);
   const peerRef = useRef<PeerConnection | undefined>(undefined);
@@ -42,7 +47,15 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     const peer = createPeer(role, signaling);
     const transfer = createTransferController(role, peer, {
       onProgress: (progress) => setTransferProgress(progress),
+      onManifest: (manifest) => {
+        setPendingManifest(manifest);
+        const override = getSinkOverride();
+        if (override !== undefined && override.autoAccept !== false) {
+          transferRef.current?.acceptTransfer();
+        }
+      },
       onResult: (result) => {
+        setPendingManifest(undefined);
         setTransferResult(result);
         setLog(
           result.verified
@@ -146,6 +159,16 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     }
   };
 
+  const acceptTransfer = (): void => {
+    transferRef.current?.acceptTransfer();
+    setPendingManifest(undefined);
+  };
+
+  const rejectTransfer = (): void => {
+    transferRef.current?.rejectTransfer();
+    setPendingManifest(undefined);
+  };
+
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>): void => {
     const file = event.currentTarget.files?.[0];
     if (file === undefined || transferRef.current === undefined) {
@@ -202,7 +225,31 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
             <dt>Buffered</dt>
             <dd data-testid="buffered-amount">{bufferedAmount}</dd>
           </div>
+          <div className="flex justify-between gap-4 border-b border-[var(--mp-olive)]/10 pb-2">
+            <dt>Sink</dt>
+            <dd data-testid="sink-strategy">{getSinkStrategy()}</dd>
+          </div>
         </dl>
+        {role === "downloader" && pendingManifest !== undefined && (
+          <div className="mt-8 flex flex-wrap items-center gap-3">
+            <button
+              className="rounded-full bg-[var(--mp-olive)] px-5 py-3 text-[var(--mp-cream)]"
+              data-testid="accept-transfer"
+              onClick={acceptTransfer}
+              type="button"
+            >
+              Save {pendingManifest.suggestedName}
+            </button>
+            <button
+              className="rounded-full border border-[var(--mp-olive)] px-5 py-3"
+              data-testid="reject-transfer"
+              onClick={rejectTransfer}
+              type="button"
+            >
+              Reject
+            </button>
+          </div>
+        )}
         {role === "uploader" && (
           <div className="mt-8 flex flex-wrap gap-3">
             <button

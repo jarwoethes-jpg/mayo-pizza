@@ -6,6 +6,9 @@ interface Window {
   /** Runtime relay-policy override used by the forced-relay e2e run. */
   __MAYO_FORCE_RELAY__?: boolean;
   __MAYO_CORRUPT_FRAME__?: boolean;
+  /** Test-only sink strategy or factory selected before the app loads. */
+  __MAYO_SINK__?: unknown;
+  __MAYO_SINK_STRATEGY__?: "fsa" | "sw" | "blob" | "null";
   __MAYO_TRANSFER_STATS__?: {
     bufferedAmount: number;
     maxBufferedAmount: number;

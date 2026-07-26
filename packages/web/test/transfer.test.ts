@@ -178,4 +178,266 @@ describe("transfer cancellation", () => {
     expect(messageListeners.size).toBe(0);
     expect(sent.at(-1)).toEqual({ t: "cancel", reason: "test cancel" });
   });
+
+  it("waits for explicit acceptance before requesting the manifest", async () => {
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    const sent: unknown[] = [];
+    const worker = {
+      onmessage: null,
+      onerror: null,
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    };
+    const data = {
+      readyState: "open",
+      bufferedAmount: 0,
+      send: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+    const ctrl = {
+      readyState: "open",
+      send: (message: unknown) => sent.push(message),
+    };
+    const peer = {
+      ctrl,
+      data,
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    const sinkFactory = vi.fn(() => ({
+      strategy: "null" as const,
+      write: vi.fn(),
+      close: vi.fn(),
+      cancel: vi.fn(),
+    }));
+    const onManifest = vi.fn();
+    const controller = createTransferController("downloader", peer as never, {
+      onManifest,
+      receiverWorkerFactory: () => worker,
+      sinkFactory,
+    });
+    const manifest = {
+      t: "manifest" as const,
+      transferId: "transfer-1",
+      mode: "single" as const,
+      items: [{ path: "file.bin", size: 1, lastModified: 0 }],
+      totalBytes: 1,
+      suggestedName: "file.bin",
+    };
+
+    ctrlHandlers.get("manifest")?.(manifest);
+    expect(onManifest).toHaveBeenCalledWith(manifest);
+    expect(sent).toEqual([]);
+    controller.acceptTransfer();
+    expect(sinkFactory).toHaveBeenCalledWith("file.bin", 1);
+    expect(sent).toEqual([]);
+    await Promise.resolve();
+    expect(sent).toContainEqual({
+      t: "request",
+      transferId: "transfer-1",
+      offset: 0,
+    });
+    controller.destroy();
+  });
+
+  it("waits for final worker chunks before closing the sink", async () => {
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    const sent: unknown[] = [];
+    let dataMessage: ((event: MessageEvent<unknown>) => void) | undefined;
+    const sinkClose = vi.fn();
+    const sinkWrite = vi.fn();
+    const sinkCancel = vi.fn();
+    const worker = {
+      onmessage: null as ((event: MessageEvent<unknown>) => void) | null,
+      onerror: null as ((event: ErrorEvent) => void) | null,
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    };
+    const data = {
+      readyState: "open",
+      bufferedAmount: 0,
+      send: vi.fn(),
+      addEventListener: vi.fn((type: string, listener: unknown) => {
+        if (type === "message") {
+          dataMessage = listener as (event: MessageEvent<unknown>) => void;
+        }
+      }),
+      removeEventListener: vi.fn(),
+    };
+    const ctrl = {
+      readyState: "open",
+      send: (message: unknown) => sent.push(message),
+    };
+    const peer = {
+      ctrl,
+      data,
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    const controller = createTransferController("downloader", peer as never, {
+      receiverWorkerFactory: () => worker,
+      sinkFactory: () => ({
+        strategy: "null" as const,
+        write: sinkWrite,
+        close: sinkClose,
+        cancel: sinkCancel,
+      }),
+    });
+    const manifest = {
+      t: "manifest" as const,
+      transferId: "transfer-final-slice",
+      mode: "single" as const,
+      items: [{ path: "file.bin", size: 8, lastModified: 0 }],
+      totalBytes: 8,
+      suggestedName: "file.bin",
+    };
+
+    ctrlHandlers.get("manifest")?.(manifest);
+    controller.acceptTransfer();
+    await Promise.resolve();
+    ctrlHandlers.get("start")?.({
+      t: "start",
+      transferId: manifest.transferId,
+      offset: 0,
+    });
+    ctrlHandlers.get("done")?.({
+      t: "done",
+      transferId: manifest.transferId,
+      sha256: "hash",
+    });
+    dataMessage?.({ data: new ArrayBuffer(8) } as MessageEvent<unknown>);
+
+    expect(sinkClose).not.toHaveBeenCalled();
+
+    const emitChunk = (chunkId: string): void => {
+      worker.onmessage?.({
+        data: {
+          t: "chunk",
+          chunkId,
+          buffer: new ArrayBuffer(4),
+          bytesDone: chunkId === "0" ? 4 : 8,
+          totalBytes: 8,
+        },
+      } as MessageEvent<unknown>);
+    };
+    emitChunk("0");
+    expect(sinkClose).not.toHaveBeenCalled();
+    emitChunk("1");
+    await vi.waitFor(() => expect(sinkClose).toHaveBeenCalledOnce());
+
+    expect(worker.postMessage).toHaveBeenCalledWith({ t: "finish" });
+    expect(sent).not.toContainEqual(expect.objectContaining({ t: "error" }));
+    controller.destroy();
+  });
+
+  it("does not report a cancelled final write after a primary worker failure", async () => {
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    const sent: unknown[] = [];
+    let dataMessage: ((event: MessageEvent<unknown>) => void) | undefined;
+    let rejectWrite: ((reason: unknown) => void) | undefined;
+    const onError = vi.fn();
+    const worker = {
+      onmessage: null as ((event: MessageEvent<unknown>) => void) | null,
+      onerror: null as ((event: ErrorEvent) => void) | null,
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    };
+    const data = {
+      readyState: "open",
+      bufferedAmount: 0,
+      send: vi.fn(),
+      addEventListener: vi.fn((type: string, listener: unknown) => {
+        if (type === "message") {
+          dataMessage = listener as (event: MessageEvent<unknown>) => void;
+        }
+      }),
+      removeEventListener: vi.fn(),
+    };
+    const ctrl = {
+      readyState: "open",
+      send: (message: unknown) => sent.push(message),
+    };
+    const peer = {
+      ctrl,
+      data,
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    const controller = createTransferController("downloader", peer as never, {
+      onError,
+      receiverWorkerFactory: () => worker,
+      sinkFactory: () => ({
+        strategy: "null" as const,
+        write: () =>
+          new Promise<void>((_, reject) => {
+            rejectWrite = reject;
+          }),
+        close: vi.fn(),
+        cancel: vi.fn(),
+      }),
+    });
+    const manifest = {
+      t: "manifest" as const,
+      transferId: "transfer-failed-final-slice",
+      mode: "single" as const,
+      items: [{ path: "file.bin", size: 4, lastModified: 0 }],
+      totalBytes: 4,
+      suggestedName: "file.bin",
+    };
+
+    ctrlHandlers.get("manifest")?.(manifest);
+    controller.acceptTransfer();
+    await Promise.resolve();
+    dataMessage?.({ data: new ArrayBuffer(4) } as MessageEvent<unknown>);
+    worker.onmessage?.({
+      data: {
+        t: "chunk",
+        chunkId: "0",
+        buffer: new ArrayBuffer(4),
+        bytesDone: 4,
+        totalBytes: 4,
+      },
+    } as MessageEvent<unknown>);
+
+    worker.onerror?.({
+      message: "primary receiver failure",
+      filename: "receiver.worker.ts",
+      lineno: 10,
+      colno: 2,
+    } as ErrorEvent);
+    rejectWrite?.(new Error("The download sink is not accepting data."));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "primary receiver failure" }),
+    );
+    expect(sent).toContainEqual(
+      expect.objectContaining({
+        t: "error",
+        message: "primary receiver failure",
+      }),
+    );
+    expect(sent).not.toContainEqual(
+      expect.objectContaining({
+        t: "error",
+        message: "The download sink is not accepting data.",
+      }),
+    );
+    controller.destroy();
+  });
 });
