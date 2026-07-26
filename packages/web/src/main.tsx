@@ -16,10 +16,19 @@ interface RoomViewProps {
   slug?: string;
 }
 
+type SessionStatus =
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "resuming"
+  | "failed";
+
 const RoomView = ({ role, slug }: RoomViewProps) => {
   const [roomSlug, setRoomSlug] = useState(slug);
   const [connectionState, setConnectionState] =
     useState<RTCPeerConnectionState>("new");
+  const [sessionStatus, setSessionStatus] =
+    useState<SessionStatus>("connecting");
   const [iceConnectionState, setIceConnectionState] =
     useState<RTCIceConnectionState>("new");
   const [lastPong, setLastPong] = useState("—");
@@ -41,12 +50,19 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
   >(undefined);
   const autoPingSent = useRef(false);
   const connectionStateRef = useRef<RTCPeerConnectionState>("new");
+  const resumePendingRef = useRef(false);
 
   useEffect(() => {
     const signaling = createSignalingClient();
     const peer = createPeer(role, signaling);
     const transfer = createTransferController(role, peer, {
-      onProgress: (progress) => setTransferProgress(progress),
+      onProgress: (progress) => {
+        setTransferProgress(progress);
+        if (resumePendingRef.current && progress.side === "receiver") {
+          resumePendingRef.current = false;
+          setSessionStatus("connected");
+        }
+      },
       onManifest: (manifest) => {
         setPendingManifest(manifest);
         const override = getSinkOverride();
@@ -63,7 +79,16 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
             : "Transfer failed integrity verification.",
         );
       },
-      onError: (error) => setLog(error.message),
+      onResumeRequested: () => {
+        resumePendingRef.current = true;
+        setSessionStatus("resuming");
+        setLog("Connection's back. Resuming your slice…");
+      },
+      onError: (error) => {
+        resumePendingRef.current = false;
+        setSessionStatus("failed");
+        setLog(error.message);
+      },
       onCancelled: (reason) => setLog(reason),
       onBufferedAmount: (amount, max) => {
         setBufferedAmount(amount);
@@ -93,7 +118,14 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       connectionStateRef.current = state;
       setConnectionState(state);
       if (state === "connected") {
-        setLog("Peer connection connected.");
+        if (!resumePendingRef.current) {
+          setSessionStatus("connected");
+        }
+        setLog("Connected.");
+      } else if (state === "new" || state === "connecting") {
+        setSessionStatus("connecting");
+      } else if (state === "disconnected" || state === "failed") {
+        setSessionStatus("reconnecting");
       }
     });
     const unsubscribeIce = peer.iceConnectionState.subscribe(
@@ -103,13 +135,37 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       setLog("Ctrl channel open.");
       sendAutoPing();
     });
+    const unsubscribeReconnecting = peer.on("reconnecting", () => {
+      setSessionStatus("reconnecting");
+      setLog("Our connection hit a rough patch. Reconnecting…");
+    });
+    const unsubscribeResuming = peer.on("resuming", () => {
+      resumePendingRef.current = true;
+      setSessionStatus("resuming");
+      setLog("Connection's back. Resuming your slice…");
+    });
+    const unsubscribeExhausted = peer.on("exhausted", () => {
+      resumePendingRef.current = false;
+      setSessionStatus("failed");
+      setLog("Slice dropped. We couldn't recover the connection.");
+    });
     const unsubscribePong = peer.on("pong", ({ nonce }) => {
       setLastPong(nonce);
       setLog("Pong received.");
     });
     const unsubscribeError = peer.on("error", ({ error }) => {
+      if (error.message.startsWith("BAD_SLUG:")) {
+        setSessionStatus("failed");
+      }
       setLog(error.message);
     });
+
+    const debugDrop = (): void => peer.debugDrop();
+    // The preview server is a production build, so the explicit init-script
+    // marker keeps this deterministic e2e hook out of normal deployments.
+    if (import.meta.env.DEV || window.__MAYO_E2E__ === true) {
+      window.__MAYO_DEBUG_DROP__ = debugDrop;
+    }
 
     const run = async (): Promise<void> => {
       try {
@@ -123,6 +179,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
         }
         await peer.ready;
       } catch (error) {
+        setSessionStatus("failed");
         setLog(error instanceof Error ? error.message : "Connection failed.");
       }
     };
@@ -132,8 +189,14 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       unsubscribeConnection();
       unsubscribeIce();
       unsubscribeCtrl();
+      unsubscribeReconnecting();
+      unsubscribeResuming();
+      unsubscribeExhausted();
       unsubscribePong();
       unsubscribeError();
+      if (window.__MAYO_DEBUG_DROP__ === debugDrop) {
+        delete window.__MAYO_DEBUG_DROP__;
+      }
       transfer.destroy();
       peer.close();
       signaling.close();
@@ -208,6 +271,10 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
           <div className="flex justify-between gap-4 border-b border-[var(--mp-olive)]/10 pb-2">
             <dt>Connection</dt>
             <dd data-testid="connection-state">{connectionState}</dd>
+          </div>
+          <div className="flex justify-between gap-4 border-b border-[var(--mp-olive)]/10 pb-2">
+            <dt>Session</dt>
+            <dd data-testid="session-status">{sessionStatus}</dd>
           </div>
           <div className="flex justify-between gap-4 border-b border-[var(--mp-olive)]/10 pb-2">
             <dt>ICE</dt>

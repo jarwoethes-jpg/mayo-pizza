@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
@@ -159,13 +159,14 @@ const handleMessage = async (
       message.password === undefined
         ? undefined
         : await argon2.hash(message.password, { type: argon2.argon2id });
-    const room = rooms.createRoom(session.id, passwordHash);
+    const uploaderToken = randomBytes(32).toString("hex");
+    const room = rooms.createRoom(session.id, passwordHash, uploaderToken);
     rooms.addPeer(room, session.id, session.socket);
     session.roomSlug = room.slug;
     sendMessage(session.socket, {
       t: "created",
       slug: room.slug,
-      uploaderToken: randomBytes(32).toString("hex"),
+      uploaderToken,
     });
     return;
   }
@@ -193,11 +194,41 @@ const handleMessage = async (
       sendError(session.socket, "BAD_SLUG", "That room is not available.");
       return;
     }
-    if (room.peers.size >= MAX_ROOM_PEERS) {
+    const suppliedToken = message.uploaderToken;
+    const isUploaderRejoin = suppliedToken !== undefined;
+    if (isUploaderRejoin) {
+      const expected = room.uploaderToken;
+      const supplied = Buffer.from(suppliedToken);
+      const expectedBuffer =
+        expected === undefined ? undefined : Buffer.from(expected);
+      if (
+        expectedBuffer === undefined ||
+        supplied.length !== expectedBuffer.length ||
+        !timingSafeEqual(supplied, expectedBuffer)
+      ) {
+        sendError(
+          session.socket,
+          "BAD_PASSWORD",
+          "That uploader token does not match.",
+        );
+        return;
+      }
+      const staleUploaderId = room.uploaderId;
+      if (staleUploaderId !== session.id) {
+        const staleUploader = room.peers.get(staleUploaderId);
+        if (staleUploader !== undefined) {
+          room.peers.delete(staleUploaderId);
+          staleUploader.close(1000, "Uploader rejoined");
+          for (const peer of room.peers.values()) {
+            sendMessage(peer, { t: "peer-left", peerId: staleUploaderId });
+          }
+        }
+      }
+    } else if (room.peers.size >= MAX_ROOM_PEERS) {
       sendError(session.socket, "ROOM_FULL", "That room is already full.");
       return;
     }
-    if (room.passwordHash !== undefined) {
+    if (!isUploaderRejoin && room.passwordHash !== undefined) {
       const valid = await argon2.verify(
         room.passwordHash,
         message.password ?? "",
@@ -214,14 +245,26 @@ const handleMessage = async (
 
     rooms.addPeer(room, session.id, session.socket);
     session.roomSlug = room.slug;
+    if (isUploaderRejoin) {
+      room.uploaderId = session.id;
+    }
     sendMessage(session.socket, {
       t: "joined",
       peerId: session.id,
-      role: "downloader",
+      role: isUploaderRejoin ? "uploader" : "downloader",
     });
-    const uploader = room.peers.get(room.uploaderId);
-    if (uploader !== undefined) {
-      sendMessage(uploader, { t: "peer-joined", peerId: session.id });
+    if (isUploaderRejoin) {
+      for (const [peerId, peer] of room.peers) {
+        if (peerId !== session.id) {
+          sendMessage(session.socket, { t: "peer-joined", peerId });
+          sendMessage(peer, { t: "peer-joined", peerId: session.id });
+        }
+      }
+    } else {
+      const uploader = room.peers.get(room.uploaderId);
+      if (uploader !== undefined) {
+        sendMessage(uploader, { t: "peer-joined", peerId: session.id });
+      }
     }
     return;
   }

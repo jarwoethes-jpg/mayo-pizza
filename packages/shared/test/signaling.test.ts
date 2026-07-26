@@ -4,6 +4,11 @@ import { signalingMessageSchema } from "../src/signaling.js";
 const validMessages = [
   { t: "create", password: "sauce" },
   { t: "join", slug: "mushroom-olive-basil-42" },
+  {
+    t: "join",
+    slug: "mushroom-olive-basil-42",
+    uploaderToken: "token",
+  },
   { t: "signal", to: "peer-2", payload: { type: "offer", sdp: "opaque" } },
   { t: "ice-config" },
   { t: "close" },
@@ -23,6 +28,7 @@ const validMessages = [
 const invalidMessages = [
   { t: "create", password: 42 },
   { t: "join" },
+  { t: "join", slug: "mushroom-olive-basil-42", unexpected: true },
   { t: "signal", to: 7, payload: null },
   { t: "ice-config", unexpected: true },
   { t: "CLOSE" },

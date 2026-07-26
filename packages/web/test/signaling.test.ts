@@ -4,6 +4,7 @@ import { getReconnectDelay, SignalingClient } from "../src/net/signaling";
 class FakeWebSocket {
   public static instances: FakeWebSocket[] = [];
   public readyState = 0;
+  public readonly sent: string[] = [];
   public onopen: (() => void) | null = null;
   public onmessage: ((event: { data: unknown }) => void) | null = null;
   public onerror: ((event: Event) => void) | null = null;
@@ -15,7 +16,9 @@ class FakeWebSocket {
     FakeWebSocket.instances.push(this);
   }
 
-  public send(): void {}
+  public send(message: string): void {
+    this.sent.push(message);
+  }
 
   public close(): void {
     this.readyState = 3;
@@ -57,6 +60,63 @@ describe("signaling reconnect schedule", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(FakeWebSocket.instances).toHaveLength(2);
+    client.close();
+  });
+
+  it("rejoins the remembered uploader room after an unexpected socket close", async () => {
+    vi.useFakeTimers();
+    const client = new SignalingClient({
+      url: "ws://example.test/ws",
+      random: () => 0.5,
+      webSocketFactory: () => new FakeWebSocket() as unknown as WebSocket,
+    });
+    const firstConnection = client.connect();
+    const first = FakeWebSocket.instances[0];
+    if (first === undefined) {
+      throw new Error("The first fake socket was not created.");
+    }
+    first.readyState = 1;
+    first.onopen?.();
+    await firstConnection;
+
+    const createPromise = client.create();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(JSON.parse(first.sent[0] ?? "{}") as unknown).toEqual({
+      t: "create",
+    });
+    first.onmessage?.({
+      data: JSON.stringify({
+        t: "created",
+        slug: "mushroom-olive-basil-42",
+        uploaderToken: "uploader-token",
+      }),
+    });
+    await createPromise;
+
+    const resumed = vi.fn();
+    client.on("room-resumed", resumed);
+    first.onclose?.({ code: 1006, reason: "drop", wasClean: false });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const second = FakeWebSocket.instances[1];
+    if (second === undefined) {
+      throw new Error("The reconnecting fake socket was not created.");
+    }
+    second.readyState = 1;
+    second.onopen?.();
+    expect(JSON.parse(second.sent[0] ?? "{}") as unknown).toEqual({
+      t: "join",
+      slug: "mushroom-olive-basil-42",
+      uploaderToken: "uploader-token",
+    });
+    second.onmessage?.({
+      data: JSON.stringify({
+        t: "joined",
+        peerId: "new-uploader-peer",
+        role: "uploader",
+      }),
+    });
+    await vi.waitFor(() => expect(resumed).toHaveBeenCalledOnce());
     client.close();
   });
 });

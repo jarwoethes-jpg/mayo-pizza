@@ -30,6 +30,67 @@ const nextMessage = (socket: WebSocket): Promise<JsonMessage> =>
     socket.once("error", reject);
   });
 
+interface FrameQueue {
+  next(): Promise<JsonMessage>;
+  dispose(): void;
+}
+
+/** Keeps one ordered receive stream per socket when several frames are pending. */
+const createFrameQueue = (socket: WebSocket): FrameQueue => {
+  const frames: JsonMessage[] = [];
+  const waiters: Array<{
+    resolve: (message: JsonMessage) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  let terminalError: Error | undefined;
+
+  const onMessage = (data: WebSocket.RawData): void => {
+    try {
+      const message = JSON.parse(data.toString()) as JsonMessage;
+      const waiter = waiters.shift();
+      if (waiter === undefined) {
+        frames.push(message);
+      } else {
+        waiter.resolve(message);
+      }
+    } catch (error) {
+      terminalError = error instanceof Error ? error : new Error(String(error));
+      const pending = waiters.splice(0);
+      for (const waiter of pending) {
+        waiter.reject(terminalError);
+      }
+    }
+  };
+  const onError = (error: Error): void => {
+    terminalError = error;
+    const pending = waiters.splice(0);
+    for (const waiter of pending) {
+      waiter.reject(error);
+    }
+  };
+  socket.on("message", onMessage);
+  socket.on("error", onError);
+
+  return {
+    next: () => {
+      const message = frames.shift();
+      if (message !== undefined) {
+        return Promise.resolve(message);
+      }
+      if (terminalError !== undefined) {
+        return Promise.reject(terminalError);
+      }
+      return new Promise<JsonMessage>((resolve, reject) => {
+        waiters.push({ resolve, reject });
+      });
+    },
+    dispose: () => {
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+    },
+  };
+};
+
 const nextClose = (socket: WebSocket): Promise<void> =>
   new Promise((resolve) => {
     socket.once("close", () => resolve());
@@ -192,6 +253,63 @@ describe("localhost signaling server", () => {
       uploader.close();
       wrongDownloader.close();
       downloader.close();
+    }
+  });
+
+  it("keeps a room after the uploader drops and symmetrically announces token rejoin", async () => {
+    const url = `ws://127.0.0.1:${port}/ws`;
+    const uploader = await openSocket(url);
+    const downloader = await openSocket(url);
+    let rejoinedUploader: WebSocket | undefined;
+    let rejoinedFrames: FrameQueue | undefined;
+
+    try {
+      const createdPromise = nextMessage(uploader);
+      uploader.send(JSON.stringify({ t: "create" }));
+      const created = await createdPromise;
+      const slug = stringField(created, "slug");
+      const uploaderToken = stringField(created, "uploaderToken");
+
+      const joinedPromise = nextMessage(downloader);
+      const peerJoinedPromise = nextMessage(uploader);
+      downloader.send(JSON.stringify({ t: "join", slug }));
+      const joined = await joinedPromise;
+      await peerJoinedPromise;
+      const downloaderPeerId = stringField(joined, "peerId");
+
+      const leftPromise = nextMessage(downloader);
+      uploader.close();
+      expect(await leftPromise).toEqual({
+        t: "peer-left",
+        peerId: expect.any(String),
+      });
+
+      rejoinedUploader = await openSocket(url);
+      rejoinedFrames = createFrameQueue(rejoinedUploader);
+      const rejoinedPromise = rejoinedFrames.next();
+      const rejoinedPeerPromise = rejoinedFrames.next();
+      const downloaderPeerAnnouncement = nextMessage(downloader);
+      rejoinedUploader.send(JSON.stringify({ t: "join", slug, uploaderToken }));
+      expect(await rejoinedPromise).toMatchObject({
+        t: "joined",
+        role: "uploader",
+        peerId: expect.any(String),
+      });
+      const rejoinedPeer = await rejoinedPeerPromise;
+      const downloaderAnnouncement = await downloaderPeerAnnouncement;
+      expect(rejoinedPeer).toEqual({
+        t: "peer-joined",
+        peerId: downloaderPeerId,
+      });
+      expect(downloaderAnnouncement).toEqual({
+        t: "peer-joined",
+        peerId: expect.any(String),
+      });
+    } finally {
+      uploader.close();
+      downloader.close();
+      rejoinedFrames?.dispose();
+      rejoinedUploader?.close();
     }
   });
 });

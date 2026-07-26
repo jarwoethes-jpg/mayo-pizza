@@ -10,6 +10,10 @@ export type SenderWorkerCommand =
       offset: number;
     }
   | {
+      t: "resume";
+      offset: number;
+    }
+  | {
       t: "cancel";
     };
 
@@ -21,6 +25,10 @@ export type SenderWorkerEvent =
       totalBytes: number;
       done: boolean;
       sha256?: string;
+    }
+  | {
+      t: "resumed";
+      offset: number;
     }
   | {
       t: "progress";
@@ -43,6 +51,9 @@ export type ReceiverWorkerCommand =
   | {
       t: "data";
       buffer: ArrayBuffer;
+    }
+  | {
+      t: "resume-seed";
     }
   | {
       t: "commit";

@@ -51,6 +51,8 @@ export class SinkManager {
   ) {}
 
   public write(bytes: Uint8Array): Promise<void> {
+    // A network drop does not cancel this queue: the peer generation can be
+    // replaced while local sink writes keep draining toward the durable cursor.
     if (this.failure !== undefined) {
       return Promise.reject(this.failure);
     }

@@ -13,4 +13,7 @@ interface Window {
     bufferedAmount: number;
     maxBufferedAmount: number;
   };
+  /** Deterministic drop hook enabled only in development or explicit e2e pages. */
+  __MAYO_E2E__?: boolean;
+  __MAYO_DEBUG_DROP__?: () => void;
 }

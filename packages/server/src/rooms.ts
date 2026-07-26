@@ -159,6 +159,7 @@ export const generateSlug = (): string => {
 export interface Room {
   slug: string;
   uploaderId: string;
+  uploaderToken?: string;
   peers: Map<string, WebSocket>;
   passwordHash?: string;
   createdAt: number;
@@ -168,7 +169,11 @@ export interface Room {
 export interface RoomRegistry {
   rooms: Map<string, Room>;
   ttlMs: number;
-  createRoom: (uploaderId: string, passwordHash?: string) => Room;
+  createRoom: (
+    uploaderId: string,
+    passwordHash?: string,
+    uploaderToken?: string,
+  ) => Room;
   getRoom: (slug: string) => Room | undefined;
   touchRoom: (room: Room, at?: number) => void;
   addPeer: (room: Room, peerId: string, socket: WebSocket) => void;
@@ -201,7 +206,7 @@ export const createRoomRegistry = (
   const registry: RoomRegistry = {
     rooms,
     ttlMs,
-    createRoom: (uploaderId, passwordHash) => {
+    createRoom: (uploaderId, passwordHash, uploaderToken) => {
       let slug = generateSlug();
       while (rooms.has(slug)) {
         slug = generateSlug();
@@ -218,6 +223,9 @@ export const createRoomRegistry = (
       if (passwordHash !== undefined) {
         room.passwordHash = passwordHash;
       }
+      if (uploaderToken !== undefined) {
+        room.uploaderToken = uploaderToken;
+      }
       rooms.set(slug, room);
       return room;
     },
@@ -232,9 +240,8 @@ export const createRoomRegistry = (
     removePeer: (room, peerId) => {
       room.peers.delete(peerId);
       room.lastSeenAt = now();
-      if (room.peers.size === 0) {
-        rooms.delete(room.slug);
-      }
+      // Keep the capability alive after a transient disconnect; the TTL
+      // reaper, rather than peer count, owns room deletion.
     },
     dispose: () => {
       if (timer !== undefined) {

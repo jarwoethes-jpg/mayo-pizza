@@ -440,4 +440,59 @@ describe("transfer cancellation", () => {
     );
     controller.destroy();
   });
+
+  it("accepts a non-zero request and re-seeds the existing sender worker", async () => {
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    const sent: unknown[] = [];
+    const worker = {
+      onmessage: null,
+      onerror: null,
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    };
+    const data = {
+      readyState: "open",
+      bufferedAmount: 0,
+      send: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+    const ctrl = {
+      readyState: "open",
+      send: (message: unknown) => sent.push(message),
+    };
+    const peer = {
+      ctrl,
+      data,
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    const controller = createTransferController("uploader", peer as never, {
+      senderWorkerFactory: () => worker,
+    });
+    await controller.startSend(new File(["payload"], "payload.txt"));
+    const transferId = (sent[0] as { transferId: string }).transferId;
+
+    ctrlHandlers.get("request")?.({
+      t: "request",
+      transferId,
+      offset: 0,
+    });
+    ctrlHandlers.get("request")?.({
+      t: "request",
+      transferId,
+      offset: 4,
+    });
+
+    expect(sent).toContainEqual({ t: "start", transferId, offset: 4 });
+    expect(worker.postMessage).toHaveBeenLastCalledWith({
+      t: "resume",
+      offset: 4,
+    });
+    controller.destroy();
+  });
 });

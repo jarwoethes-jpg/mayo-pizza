@@ -34,6 +34,7 @@ export interface SignalingCloseEvent {
 export interface SignalingEventMap {
   open: undefined;
   close: SignalingCloseEvent;
+  "room-resumed": undefined;
   created: Extract<SignalingServerMessage, { t: "created" }>;
   joined: Extract<SignalingServerMessage, { t: "joined" }>;
   "peer-joined": Extract<SignalingServerMessage, { t: "peer-joined" }>;
@@ -58,6 +59,13 @@ export interface SignalingClientOptions {
   random?: () => number;
   setTimeout?: typeof globalThis.setTimeout;
   clearTimeout?: typeof globalThis.clearTimeout;
+}
+
+interface RoomSession {
+  slug: string;
+  password?: string;
+  uploaderToken?: string;
+  role: "uploader" | "downloader";
 }
 
 const MAX_RECONNECT_DELAY = 30_000;
@@ -138,6 +146,7 @@ export class SignalingClient {
   } = {
     open: new Set(),
     close: new Set(),
+    "room-resumed": new Set(),
     created: new Set(),
     joined: new Set(),
     "peer-joined": new Set(),
@@ -161,6 +170,20 @@ export class SignalingClient {
   private reconnectTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
   private reconnectAttempt = 0;
   private manuallyClosed = false;
+  private resumeOnOpen = false;
+  private resumeInFlight = false;
+  private roomResumePromise: Promise<void> | undefined;
+  private roomSession: RoomSession | undefined;
+  private readonly onlineListener = (): void => {
+    if (this.manuallyClosed) {
+      return;
+    }
+    if (this.reconnectTimer !== undefined) {
+      this.clearTimer(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    void this.connect().catch(() => undefined);
+  };
   private readonly pendingRequests: PendingRequest[] = [];
 
   public constructor(options: SignalingClientOptions = {}) {
@@ -170,6 +193,14 @@ export class SignalingClient {
     this.random = options.random ?? Math.random;
     this.setTimer = options.setTimeout ?? globalThis.setTimeout;
     this.clearTimer = options.clearTimeout ?? globalThis.clearTimeout;
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", this.onlineListener);
+    }
+  }
+
+  /** Reports whether the signaling transport is currently open. */
+  public get isOpen(): boolean {
+    return this.socket?.readyState === WEBSOCKET_OPEN;
   }
 
   public on<K extends EventName>(
@@ -205,6 +236,7 @@ export class SignalingClient {
 
   public async send(message: SignalingClientMessage): Promise<void> {
     await this.connect();
+    await this.roomResumePromise;
     if (this.socket?.readyState !== WEBSOCKET_OPEN) {
       throw new Error("The signaling socket is not open.");
     }
@@ -219,7 +251,14 @@ export class SignalingClient {
       password === undefined ? { t: "create" } : { t: "create", password };
     try {
       await this.send(message);
-      return await response.promise;
+      const created = await response.promise;
+      this.roomSession = {
+        slug: created.slug,
+        ...(password === undefined ? {} : { password }),
+        uploaderToken: created.uploaderToken,
+        role: "uploader",
+      };
+      return created;
     } catch (error) {
       response.cancel();
       throw error;
@@ -229,15 +268,25 @@ export class SignalingClient {
   public async join(
     slug: string,
     password?: string,
+    uploaderToken?: string,
   ): Promise<Extract<SignalingServerMessage, { t: "joined" }>> {
     const response = this.waitFor("joined");
-    const message: Extract<SignalingClientMessage, { t: "join" }> =
-      password === undefined
-        ? { t: "join", slug }
-        : { t: "join", slug, password };
+    const message: Extract<SignalingClientMessage, { t: "join" }> = {
+      t: "join",
+      slug,
+      ...(password === undefined ? {} : { password }),
+      ...(uploaderToken === undefined ? {} : { uploaderToken }),
+    };
     try {
       await this.send(message);
-      return await response.promise;
+      const joined = await response.promise;
+      this.roomSession = {
+        slug,
+        ...(password === undefined ? {} : { password }),
+        ...(uploaderToken === undefined ? {} : { uploaderToken }),
+        role: joined.role,
+      };
+      return joined;
     } catch (error) {
       response.cancel();
       throw error;
@@ -268,6 +317,11 @@ export class SignalingClient {
       this.reconnectTimer = undefined;
     }
     this.rejectPending(new Error("The signaling client was closed."));
+    this.roomSession = undefined;
+    this.roomResumePromise = undefined;
+    if (typeof window !== "undefined") {
+      window.removeEventListener("online", this.onlineListener);
+    }
     const socket = this.socket;
     this.socket = undefined;
     if (socket !== undefined) {
@@ -331,6 +385,12 @@ export class SignalingClient {
       this.rejectConnection = undefined;
       this.connectionPromise = undefined;
       this.emit("open", undefined);
+      const shouldResume = this.resumeOnOpen;
+      this.resumeOnOpen = false;
+      if (shouldResume) {
+        this.roomResumePromise = this.resumeRoom();
+        void this.roomResumePromise.catch(() => undefined);
+      }
     };
     socket.onmessage = (event) => {
       if (this.socket !== socket) {
@@ -359,6 +419,8 @@ export class SignalingClient {
         wasClean: event.wasClean,
       });
       if (!this.manuallyClosed) {
+        this.resumeOnOpen = this.roomSession !== undefined;
+        this.rejectPending(new Error("The signaling socket closed."));
         this.scheduleReconnect();
       }
     };
@@ -382,6 +444,14 @@ export class SignalingClient {
     this.emit(message.t, message);
     if (message.t === "error") {
       this.rejectPending(new Error(`${message.code}: ${message.message}`));
+      if (this.resumeInFlight && message.code === "BAD_SLUG") {
+        this.manuallyClosed = true;
+        if (this.reconnectTimer !== undefined) {
+          this.clearTimer(this.reconnectTimer);
+          this.reconnectTimer = undefined;
+        }
+        this.socket?.close(1000, "Room expired");
+      }
       return;
     }
 
@@ -436,6 +506,42 @@ export class SignalingClient {
         void this.connect().catch(() => undefined);
       }
     }, delay);
+  }
+
+  private async resumeRoom(): Promise<void> {
+    const session = this.roomSession;
+    if (session === undefined || this.manuallyClosed || this.resumeInFlight) {
+      return;
+    }
+    this.resumeInFlight = true;
+    const response = this.waitFor("joined");
+    try {
+      const message: Extract<SignalingClientMessage, { t: "join" }> = {
+        t: "join",
+        slug: session.slug,
+        ...(session.password === undefined
+          ? {}
+          : { password: session.password }),
+        ...(session.uploaderToken === undefined
+          ? {}
+          : { uploaderToken: session.uploaderToken }),
+      };
+      if (!this.isOpen) {
+        throw new Error("The signaling socket is not open.");
+      }
+      this.socket?.send(JSON.stringify(message));
+      const joined = await response.promise;
+      this.roomSession = { ...session, role: joined.role };
+      this.emit("room-resumed", undefined);
+    } catch (error) {
+      response.cancel();
+      if (error instanceof Error && error.message.startsWith("BAD_SLUG:")) {
+        this.manuallyClosed = true;
+      }
+      throw error;
+    } finally {
+      this.resumeInFlight = false;
+    }
   }
 
   private emit<K extends EventName>(

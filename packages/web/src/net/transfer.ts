@@ -7,6 +7,7 @@ import type {
   SenderWorkerEvent,
 } from "../worker/messages";
 import type { PeerConnection } from "./peer";
+import type { CtrlProtocol } from "./protocol";
 
 export const FRAME_SIZE = 16_384;
 export const READ_SLICE = 4 * 1024 * 1024;
@@ -38,6 +39,7 @@ export interface TransferControllerOptions {
   onResult?: (result: TransferResult) => void;
   onError?: (error: Error) => void;
   onCancelled?: (reason: string) => void;
+  onResumeRequested?: () => void;
   onBufferedAmount?: (
     bufferedAmount: number,
     maxBufferedAmount: number,
@@ -312,9 +314,17 @@ export class TransferController {
   private senderAckedBytes = 0;
   private senderWaitingForAck = false;
   private senderSliceDrained = false;
+  private senderResuming = false;
+  private pendingSenderRequest:
+    | Extract<TransferMessage, { t: "request" }>
+    | undefined;
   private receiverTotalBytes = 0;
   private receiverForwardedBytes = 0;
   private receiverSinkForwardedBytes = 0;
+  private receiverCommittedBytes = 0;
+  private receiverInFlightCommits = 0;
+  private receiverResumeCtrl: CtrlProtocol | undefined;
+  private receiverResumeData: RTCDataChannel | undefined;
   private receiverStarted = false;
   private receiverFinishRequested = false;
   private receiverSinkManager: SinkManager | undefined;
@@ -325,8 +335,12 @@ export class TransferController {
     | undefined;
   private destroyed = false;
   private ctrlOpen = false;
+  private dataOpen = false;
+  private ctrlOpenCount = 0;
+  private currentCtrl: CtrlProtocol | undefined;
+  private currentData: RTCDataChannel | undefined;
   private resolveChannels: (() => void) | undefined;
-  private readonly channelsReady: Promise<void>;
+  private channelsReady: Promise<void>;
 
   public constructor(
     private readonly role: "uploader" | "downloader",
@@ -340,13 +354,22 @@ export class TransferController {
     });
     this.unsubs.push(
       peer.on("ctrl-open", () => {
+        this.refreshChannelGeneration();
         this.ctrlOpen = true;
+        this.ctrlOpenCount += 1;
         this.resolveIfChannelsReady();
+        this.maybeResumeReceiver();
       }),
       peer.on("data-open", () => {
         this.attachDataChannel();
+        this.refreshChannelGeneration();
+        this.dataOpen = true;
         this.resolveIfChannelsReady();
+        this.maybeResumeReceiver();
       }),
+      peer.on("exhausted", () =>
+        this.fail("The connection was lost and could not be recovered."),
+      ),
       peer.onCtrl("manifest", (message) => this.handleManifest(message)),
       peer.onCtrl("request", (message) => this.handleRequest(message)),
       peer.onCtrl("start", (message) => this.handleStart(message)),
@@ -357,7 +380,9 @@ export class TransferController {
       peer.onCtrl("cancel", (message) => this.handleCancel(message)),
     );
     this.attachDataChannel();
+    this.refreshChannelGeneration();
     this.ctrlOpen = peer.ctrl?.readyState === "open";
+    this.dataOpen = peer.data?.readyState === "open";
     this.resolveIfChannelsReady();
   }
 
@@ -509,6 +534,10 @@ export class TransferController {
     this.receiverManifest = message;
     this.receiverTotalBytes = message.totalBytes;
     this.receiverForwardedBytes = 0;
+    this.receiverCommittedBytes = 0;
+    this.receiverInFlightCommits = 0;
+    this.receiverResumeCtrl = undefined;
+    this.receiverResumeData = undefined;
     this.receiverStarted = false;
     this.receiverFinishRequested = false;
     this.receiverDoneMessage = undefined;
@@ -531,22 +560,41 @@ export class TransferController {
   private handleRequest(
     message: Extract<TransferMessage, { t: "request" }>,
   ): void {
-    if (this.role !== "uploader" || message.offset !== 0) {
+    if (this.role !== "uploader") {
       return;
     }
     if (
       this.transferId !== message.transferId ||
       this.senderFile === undefined
     ) {
-      this.fail("The transfer request does not match the selected file.");
+      // A stale request can arrive after the sender has completed or replaced
+      // a transfer. It is harmless and must not tear down a healthy session.
       return;
     }
-    const worker = this.createSenderWorker();
+    if (
+      message.offset > this.senderFile.size ||
+      (message.offset > 0 && this.senderResuming)
+    ) {
+      return;
+    }
     const dataChannel = this.peer.data;
-    if (dataChannel === undefined) {
-      this.fail("The data channel is unavailable.");
+    if (dataChannel === undefined || dataChannel.readyState !== "open") {
+      this.pendingSenderRequest = message;
       return;
     }
+    this.pendingSenderRequest = undefined;
+    this.senderPump?.cancel();
+    const hadWorker = this.senderWorker !== undefined;
+    const worker = this.senderWorker ?? this.createSenderWorker();
+    this.senderResuming = message.offset > 0;
+    this.senderCursor = message.offset;
+    this.senderReadPending = false;
+    this.senderLastSlice = false;
+    this.senderSha256 = "";
+    this.senderDoneSent = false;
+    this.senderAckedBytes = message.offset;
+    this.senderWaitingForAck = false;
+    this.senderSliceDrained = false;
     this.senderPump = new WatermarkFramePump(dataChannel, {
       frameSize: Math.min(FRAME_SIZE, this.peer.maxMessageSize ?? FRAME_SIZE),
       corruptFirstFrame: isCorruptionRequested(),
@@ -568,13 +616,23 @@ export class TransferController {
       transferId: message.transferId,
       offset: message.offset,
     });
-    worker.postMessage({
-      t: "start",
-      file: this.senderFile,
-      offset: message.offset,
-      totalBytes: this.senderFile.size,
-    });
-    this.requestNextSenderSlice();
+    if (!hadWorker || message.offset === 0) {
+      // Offset zero can also be a reconnect before the first durable byte;
+      // reset the existing worker rather than continuing its old hash state.
+      worker.postMessage({
+        t: "start",
+        file: this.senderFile,
+        offset: 0,
+        totalBytes: this.senderFile.size,
+      });
+    }
+    if (message.offset > 0) {
+      // The worker re-seeds from its nearest 4 MiB hash snapshot and reads at
+      // most one slice to reach the exact durable receiver offset.
+      worker.postMessage({ t: "resume", offset: message.offset });
+    } else {
+      this.requestNextSenderSlice();
+    }
   }
 
   private handleStart(message: Extract<TransferMessage, { t: "start" }>): void {
@@ -679,6 +737,23 @@ export class TransferController {
       this.reportProgress({ ...event, side: "sender" });
       return;
     }
+    if (event.t === "resumed") {
+      this.senderResuming = false;
+      this.senderReadPending = false;
+      this.senderCursor = event.offset;
+      this.senderLastSlice = false;
+      this.senderSha256 = "";
+      // Resume has no buffered slice in the new pump; the next read is safe
+      // as soon as the worker confirms the hash covers 0..offset.
+      this.senderSliceDrained = true;
+      this.requestNextSenderSlice();
+      return;
+    }
+    if (this.senderResuming) {
+      // A slice read by the previous channel generation may still be queued
+      // when the resume command arrives; it belongs to the cancelled pump.
+      return;
+    }
     this.senderReadPending = false;
     this.senderCursor = event.bytesDone;
     this.senderLastSlice = event.done;
@@ -720,15 +795,26 @@ export class TransferController {
         this.fail("The receiver worker exceeded the manifest size.");
         return;
       }
+      this.receiverInFlightCommits += 1;
       void sinkManager
         .write(new Uint8Array(event.buffer))
         .then(() => {
+          this.receiverInFlightCommits = Math.max(
+            0,
+            this.receiverInFlightCommits - 1,
+          );
           if (this.destroyed || this.receiverWorker !== worker) {
             return;
           }
+          this.receiverCommittedBytes += event.buffer.byteLength;
           worker.postMessage({ t: "commit", chunkId: event.chunkId });
+          this.maybeResumeReceiver();
         })
         .catch((error: unknown) => {
+          this.receiverInFlightCommits = Math.max(
+            0,
+            this.receiverInFlightCommits - 1,
+          );
           if (this.destroyed || this.receiverWorker !== worker) {
             return;
           }
@@ -757,7 +843,7 @@ export class TransferController {
       !this.receiverFinishRequested ||
       !this.receiverStarted ||
       this.receiverSinkManager === undefined ||
-      this.receiverSinkForwardedBytes < this.receiverTotalBytes
+      this.receiverCommittedBytes < this.receiverTotalBytes
     ) {
       this.fail("The receiver worker finished before the sink was drained.");
       return;
@@ -820,9 +906,13 @@ export class TransferController {
 
   private attachDataChannel(): void {
     const dataChannel = this.peer.data;
-    if (dataChannel === undefined || this.dataChannelCleanup !== undefined) {
+    if (dataChannel === undefined || this.currentData === dataChannel) {
       return;
     }
+    this.dataChannelCleanup?.();
+    this.dataChannelCleanup = undefined;
+    this.currentData = dataChannel;
+    this.receiverForwardedBytes = this.receiverCommittedBytes;
     const onMessage = (event: MessageEvent<unknown>): void => {
       if (this.role !== "downloader" || this.receiverWorker === undefined) {
         return;
@@ -845,7 +935,53 @@ export class TransferController {
     this.dataChannelCleanup = () => {
       dataChannel.removeEventListener("message", onMessage);
     };
+    this.refreshChannelGeneration();
     this.resolveIfChannelsReady();
+    if (this.pendingSenderRequest !== undefined) {
+      this.handleRequest(this.pendingSenderRequest);
+    }
+  }
+
+  private maybeResumeReceiver(): void {
+    if (
+      this.role !== "downloader" ||
+      this.ctrlOpenCount < 2 ||
+      !this.ctrlOpen ||
+      !this.dataOpen ||
+      this.peer.ctrl?.readyState !== "open" ||
+      this.peer.data?.readyState !== "open" ||
+      this.transferId === undefined ||
+      this.receiverSinkManager === undefined ||
+      this.receiverWorker === undefined ||
+      this.receiverCommittedBytes >= this.receiverTotalBytes
+    ) {
+      return;
+    }
+    if (
+      this.receiverResumeCtrl === this.peer.ctrl &&
+      this.receiverResumeData === this.peer.data
+    ) {
+      return;
+    }
+    if (this.receiverInFlightCommits > 0) {
+      return;
+    }
+    this.receiverResumeCtrl = this.peer.ctrl;
+    this.receiverResumeData = this.peer.data;
+    const worker = this.receiverWorker;
+    worker.postMessage({ t: "resume-seed" });
+    try {
+      this.sendCtrl({
+        t: "request",
+        transferId: this.transferId,
+        offset: this.receiverCommittedBytes,
+      });
+      this.options.onResumeRequested?.();
+    } catch (error) {
+      this.receiverResumeCtrl = undefined;
+      this.receiverResumeData = undefined;
+      this.fail(this.errorMessage(error, "The resume channel is not ready."));
+    }
   }
 
   private maybeFinishReceiver(): void {
@@ -897,12 +1033,28 @@ export class TransferController {
   private resolveIfChannelsReady(): void {
     if (
       this.ctrlOpen &&
+      this.dataOpen &&
       this.peer.ctrl?.readyState === "open" &&
       this.peer.data?.readyState === "open"
     ) {
       this.resolveChannels?.();
       this.resolveChannels = undefined;
     }
+  }
+
+  private refreshChannelGeneration(): void {
+    const ctrl = this.peer.ctrl;
+    const data = this.peer.data;
+    if (ctrl === this.currentCtrl && data === this.currentData) {
+      return;
+    }
+    this.currentCtrl = ctrl;
+    this.currentData = data;
+    this.ctrlOpen = ctrl?.readyState === "open";
+    this.dataOpen = data?.readyState === "open";
+    this.channelsReady = new Promise((resolve) => {
+      this.resolveChannels = resolve;
+    });
   }
 
   private reportProgress(progress: TransferProgress): void {
@@ -978,9 +1130,15 @@ export class TransferController {
     this.senderAckedBytes = 0;
     this.senderWaitingForAck = false;
     this.senderSliceDrained = false;
+    this.senderResuming = false;
+    this.pendingSenderRequest = undefined;
     this.receiverTotalBytes = 0;
     this.receiverForwardedBytes = 0;
     this.receiverSinkForwardedBytes = 0;
+    this.receiverCommittedBytes = 0;
+    this.receiverInFlightCommits = 0;
+    this.receiverResumeCtrl = undefined;
+    this.receiverResumeData = undefined;
     this.receiverStarted = false;
     this.receiverFinishRequested = false;
     this.receiverDoneMessage = undefined;

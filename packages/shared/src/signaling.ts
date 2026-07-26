@@ -30,6 +30,7 @@ export const signalingMessageSchema = z.union([
       t: z.literal("join"),
       slug: z.string(),
       password: z.string().optional(),
+      uploaderToken: z.string().optional(),
     })
     .strict(),
   z

@@ -218,6 +218,9 @@ export class SwStreamSink implements Sink {
   }
 
   public write(bytes: Uint8Array): Promise<void> {
+    // The stream remains open during same-session reconnects; only committed
+    // writes consume SW credit, so the resumed data channel starts at the next
+    // durable byte instead of truncating or duplicating the download.
     if (this.closed) {
       return Promise.reject(new Error("The file sink is already closed."));
     }

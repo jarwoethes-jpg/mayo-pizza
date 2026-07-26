@@ -12,4 +12,6 @@ interface Window {
     bufferedAmount: number;
     maxBufferedAmount: number;
   };
+  __MAYO_E2E__?: boolean;
+  __MAYO_DEBUG_DROP__?: () => void;
 }

@@ -16,6 +16,10 @@ export class ReceiverProcessor {
   private committedBytes = 0;
   private nextAckAt = RECEIVER_ACK_INTERVAL;
   private hasher = sha256.create();
+  // A snapshot is the hash of the exact byte prefix represented by that chunk.
+  // Data arrives before sink commit, so the committed snapshot is adopted only
+  // after the durable write completes; this avoids re-reading any sink bytes.
+  private lastCommittedState = this.hasher.clone();
   private startedAt = 0;
   private lastProgressAt = 0;
   private cancelled = false;
@@ -46,6 +50,10 @@ export class ReceiverProcessor {
       this.handleData(command.buffer);
       return;
     }
+    if (command.t === "resume-seed") {
+      this.resumeSeed();
+      return;
+    }
     if (command.t === "commit") {
       this.handleCommit(command.chunkId);
       return;
@@ -68,6 +76,7 @@ export class ReceiverProcessor {
       RECEIVER_ACK_INTERVAL,
     );
     this.hasher = sha256.create();
+    this.lastCommittedState = this.hasher.clone();
     this.startedAt = performance.now();
     this.lastProgressAt = 0;
     this.cancelled = false;
@@ -75,6 +84,7 @@ export class ReceiverProcessor {
     this.finishRequested = false;
     this.nextChunkId = 0;
     this.pendingChunks.clear();
+    this.snapshots.clear();
   }
 
   private handleData(buffer: ArrayBuffer): void {
@@ -87,6 +97,7 @@ export class ReceiverProcessor {
     const chunkId = `${this.nextChunkId}`;
     this.nextChunkId += 1;
     this.pendingChunks.set(chunkId, bytes.byteLength);
+    this.snapshots.set(chunkId, this.hasher.clone());
     this.postMessage(
       {
         t: "chunk",
@@ -111,11 +122,44 @@ export class ReceiverProcessor {
     }
     this.pendingChunks.delete(chunkId);
     this.committedBytes += byteLength;
+    const committedState = this.snapshots.get(chunkId);
+    if (committedState === undefined) {
+      this.sendError("The receiver hash snapshot is missing.");
+      return;
+    }
+    this.lastCommittedState = committedState;
+    for (const pendingId of this.snapshots.keys()) {
+      this.snapshots.delete(pendingId);
+      if (pendingId === chunkId) {
+        break;
+      }
+    }
     while (this.committedBytes >= this.nextAckAt) {
       this.postMessage({ t: "ack", receivedBytes: this.nextAckAt });
       this.nextAckAt += RECEIVER_ACK_INTERVAL;
     }
     this.finishIfDrained();
+  }
+
+  private readonly snapshots = new Map<
+    string,
+    ReturnType<typeof sha256.create>
+  >();
+
+  private resumeSeed(): void {
+    if (this.pendingChunks.size > 0) {
+      this.sendError("The receiver cannot resume before sink writes drain.");
+      return;
+    }
+    this.hasher = this.lastCommittedState.clone();
+    this.bytesDone = this.committedBytes;
+    this.nextAckAt = this.committedBytes + RECEIVER_ACK_INTERVAL;
+    this.cancelled = false;
+    this.finished = false;
+    this.finishRequested = false;
+    this.nextChunkId = 0;
+    this.startedAt = performance.now();
+    this.lastProgressAt = 0;
   }
 
   private finishIfDrained(): void {

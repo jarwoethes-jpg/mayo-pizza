@@ -25,4 +25,19 @@ describe("pizza room registry", () => {
     expect(reapIdleRooms(registry, now + ROOM_TTL_MS + 1)).toBe(1);
     expect(registry.rooms.has(room.slug)).toBe(false);
   });
+
+  it("keeps empty rooms alive for uploader token rejoin until the TTL reaper", () => {
+    const now = 1_700_000_000_000;
+    const registry = createRoomRegistry({ now: () => now, startReaper: false });
+    const room = registry.createRoom("uploader-1", undefined, "token-1");
+    const socket = { close: () => undefined } as never;
+
+    registry.addPeer(room, "uploader-1", socket);
+    registry.removePeer(room, "uploader-1");
+
+    expect(registry.rooms.has(room.slug)).toBe(true);
+    expect(room.uploaderToken).toBe("token-1");
+    expect(reapIdleRooms(registry, now + ROOM_TTL_MS + 1)).toBe(1);
+    expect(registry.rooms.has(room.slug)).toBe(false);
+  });
 });

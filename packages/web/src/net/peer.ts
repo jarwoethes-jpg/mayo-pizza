@@ -56,6 +56,10 @@ export class RemoteIceCandidateQueue {
     this.pending.push(candidate);
   }
 
+  public clear(): void {
+    this.pending.length = 0;
+  }
+
   public async flush(
     addCandidate: (candidate: RTCIceCandidateInit) => Promise<void> | void,
   ): Promise<void> {
@@ -73,6 +77,10 @@ export interface PeerError {
 export interface PeerEventMap {
   "ctrl-open": undefined;
   "data-open": undefined;
+  "peer-gone": { peerId: string };
+  reconnecting: undefined;
+  resuming: undefined;
+  exhausted: undefined;
   pong: Extract<CtrlMessage, { t: "pong" }>;
   error: PeerError;
 }
@@ -82,9 +90,10 @@ type PeerEventListener<K extends PeerEventName> = (
   payload: PeerEventMap[K],
 ) => void;
 
-interface PendingCtrlHandler {
+interface RegisteredCtrlHandler {
   type: CtrlMessageType;
   handler: CtrlHandler<CtrlMessageType>;
+  unsubscribeCurrent?: () => void;
 }
 
 export interface PeerConnection {
@@ -103,6 +112,8 @@ export interface PeerConnection {
     handler: CtrlHandler<T>,
   ): () => void;
   sendPing(nonce?: string): string;
+  /** Test-only hook for forcing the same recovery path as a broken network. */
+  debugDrop(): void;
   close(): void;
 }
 
@@ -136,6 +147,11 @@ const getDescription = (
   return { type: candidate.type, sdp: candidate.sdp };
 };
 
+const isRebuildPayload = (payload: unknown): boolean =>
+  typeof payload === "object" &&
+  payload !== null &&
+  (payload as { mayo?: unknown }).mayo === "rebuild";
+
 const makeNonce = (): string => {
   if (typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -143,18 +159,28 @@ const makeNonce = (): string => {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 };
 
+/**
+ * Owns one WebRTC generation and its recovery ladder. A disconnected ICE
+ * state gets three seconds to heal; failed ICE first tries an ICE restart,
+ * then replaces the entire peer connection. Five consecutive restart/rebuild
+ * failures are terminal so a partial transfer can be discarded by its owner.
+ */
 class PeerConnectionImpl implements PeerConnection {
   private readonly eventListeners: {
     [K in PeerEventName]: Set<PeerEventListener<K>>;
   } = {
     "ctrl-open": new Set(),
     "data-open": new Set(),
+    "peer-gone": new Set(),
+    reconnecting: new Set(),
+    resuming: new Set(),
+    exhausted: new Set(),
     pong: new Set(),
     error: new Set(),
   };
   private readonly signalingUnsubscribers: Array<() => void> = [];
-  private readonly remoteCandidates = new RemoteIceCandidateQueue();
-  private readonly pendingCtrlHandlers: PendingCtrlHandler[] = [];
+  private readonly registeredCtrlHandlers: RegisteredCtrlHandler[] = [];
+  private remoteCandidates = new RemoteIceCandidateQueue();
   private readonly bufferedSignals: Array<{
     from: string;
     payload?: unknown;
@@ -166,6 +192,7 @@ class PeerConnectionImpl implements PeerConnection {
   private readonly role: PeerRole;
   private readonly signaling: SignalingClient;
   private peerConnection: RTCPeerConnection | undefined;
+  private configuration: RTCConfiguration | undefined;
   private ctrlProtocol: CtrlProtocol | undefined;
   private ctrlChannel: RTCDataChannel | undefined;
   private dataChannel: RTCDataChannel | undefined;
@@ -176,6 +203,18 @@ class PeerConnectionImpl implements PeerConnection {
   private startPromise: Promise<void> | undefined;
   private signalChain = Promise.resolve();
   private closed = false;
+  private signalingOpen = false;
+  private disconnectedTimer:
+    | ReturnType<typeof globalThis.setTimeout>
+    | undefined;
+  private recoveryTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+  private recoveryAttempt = 0;
+  private recoveryInFlight = false;
+  private rebuildPending = false;
+  private rebuildInFlight = false;
+  private rebuildAgainPending = false;
+  private rebuildAgainSignal = false;
+  private rebuildPromise: Promise<void> | undefined;
 
   public readonly connectionState = this.connectionStateValue;
   public readonly iceConnectionState = this.iceConnectionStateValue;
@@ -184,24 +223,50 @@ class PeerConnectionImpl implements PeerConnection {
   public constructor(role: PeerRole, signaling: SignalingClient) {
     this.role = role;
     this.signaling = signaling;
+    this.signalingOpen = signaling.isOpen;
     this.signalingUnsubscribers.push(
+      signaling.on("open", () => {
+        this.signalingOpen = true;
+      }),
+      signaling.on("close", () => {
+        this.signalingOpen = false;
+        if (!this.closed) {
+          this.rebuildPending = true;
+          this.emit("reconnecting", undefined);
+        }
+      }),
+      signaling.on("room-resumed", () => {
+        if (this.closed) {
+          return;
+        }
+        // Peer ids change on rejoin; always re-derive the remote id from the
+        // next peer-joined/signal event instead of reusing the stale id.
+        this.remotePeerId = undefined;
+        this.rebuildPending = true;
+        this.emit("resuming", undefined);
+      }),
       signaling.on("peer-joined", (message) => {
         this.setRemotePeer(message.peerId);
-        void this.maybeCreateOffer();
+        void this.maybeCreateOffer().catch((error: unknown) =>
+          this.emitError(error),
+        );
       }),
       signaling.on("signal", (message) => {
-        this.remotePeerId ??= message.from;
-        if (this.peerConnection === undefined) {
+        if (this.peerConnection === undefined || this.rebuildPending) {
           this.bufferedSignals.push(message);
           return;
         }
+        this.remotePeerId ??= message.from;
         this.signalChain = this.signalChain
           .then(() => this.processSignal(message.from, message.payload))
           .catch((error: unknown) => this.emitError(error));
       }),
       signaling.on("peer-left", (message) => {
         if (message.peerId === this.remotePeerId) {
-          this.close();
+          this.remotePeerId = undefined;
+          this.rebuildPending = true;
+          this.emit("peer-gone", { peerId: message.peerId });
+          this.emit("reconnecting", undefined);
         }
       }),
       signaling.on("transport-error", ({ error }) => this.emitError(error)),
@@ -249,20 +314,21 @@ class PeerConnectionImpl implements PeerConnection {
     type: T,
     handler: CtrlHandler<T>,
   ): () => void {
-    if (this.ctrlProtocol === undefined) {
-      const pending: PendingCtrlHandler = {
-        type,
-        handler: handler as unknown as CtrlHandler<CtrlMessageType>,
-      };
-      this.pendingCtrlHandlers.push(pending);
-      return () => {
-        const index = this.pendingCtrlHandlers.indexOf(pending);
-        if (index !== -1) {
-          this.pendingCtrlHandlers.splice(index, 1);
-        }
-      };
+    const registered: RegisteredCtrlHandler = {
+      type,
+      handler: handler as unknown as CtrlHandler<CtrlMessageType>,
+    };
+    this.registeredCtrlHandlers.push(registered);
+    if (this.ctrlProtocol !== undefined) {
+      registered.unsubscribeCurrent = this.ctrlProtocol.on(type, handler);
     }
-    return this.ctrlProtocol.on(type, handler);
+    return () => {
+      registered.unsubscribeCurrent?.();
+      const index = this.registeredCtrlHandlers.indexOf(registered);
+      if (index !== -1) {
+        this.registeredCtrlHandlers.splice(index, 1);
+      }
+    };
   }
 
   public sendPing(nonce = makeNonce()): string {
@@ -273,11 +339,16 @@ class PeerConnectionImpl implements PeerConnection {
     return nonce;
   }
 
+  public debugDrop(): void {
+    this.peerConnection?.close();
+  }
+
   public close(): void {
     if (this.closed) {
       return;
     }
     this.closed = true;
+    this.clearRecoveryTimers();
     for (const unsubscribe of this.signalingUnsubscribers) {
       unsubscribe();
     }
@@ -292,7 +363,7 @@ class PeerConnectionImpl implements PeerConnection {
       return;
     }
 
-    const configuration: RTCConfiguration = {
+    this.configuration = {
       iceServers: iceServers.map((server) => ({
         urls: server.urls,
         ...(server.username === undefined ? {} : { username: server.username }),
@@ -304,36 +375,98 @@ class PeerConnectionImpl implements PeerConnection {
         ? { iceTransportPolicy: "relay" as const }
         : {}),
     };
-    const peerConnection = new RTCPeerConnection(configuration);
+    await this.replacePeerConnection(false, true);
+  }
+
+  private async replacePeerConnection(
+    sendRebuildSignal: boolean,
+    createInitialOffer: boolean,
+  ): Promise<void> {
+    if (this.closed || this.configuration === undefined) {
+      return;
+    }
+    const previous = this.peerConnection;
+    previous?.close();
+    this.ctrlProtocol?.dispose();
+    this.peerConnection = undefined;
+    this.ctrlProtocol = undefined;
+    this.ctrlChannel = undefined;
+    this.dataChannel = undefined;
+    this.remoteDescriptionSet = false;
+    this.remoteCandidates = new RemoteIceCandidateQueue();
+    this.localCandidates = [];
+    this.offerStarted = false;
+    this.connectionStateValue.value = "connecting";
+    this.iceConnectionStateValue.value = "new";
+
+    const peerConnection = new RTCPeerConnection(this.configuration);
     this.peerConnection = peerConnection;
     peerConnection.onconnectionstatechange = () => {
+      if (this.peerConnection !== peerConnection) {
+        return;
+      }
       this.connectionStateValue.value = peerConnection.connectionState;
+      if (peerConnection.connectionState === "connected") {
+        this.resetRecovery();
+      } else if (
+        peerConnection.connectionState === "disconnected" ||
+        peerConnection.connectionState === "failed"
+      ) {
+        this.handleConnectionDrop(peerConnection.connectionState);
+      }
     };
     peerConnection.oniceconnectionstatechange = () => {
+      if (this.peerConnection !== peerConnection) {
+        return;
+      }
       this.iceConnectionStateValue.value = peerConnection.iceConnectionState;
+      if (
+        peerConnection.iceConnectionState === "connected" ||
+        peerConnection.iceConnectionState === "completed"
+      ) {
+        this.resetRecovery();
+      } else if (peerConnection.iceConnectionState === "disconnected") {
+        this.startDisconnectedTimer(peerConnection);
+      } else if (peerConnection.iceConnectionState === "failed") {
+        this.handleConnectionDrop("failed");
+      }
     };
     peerConnection.onicecandidate = (event) => {
-      if (event.candidate === null) {
+      if (this.peerConnection !== peerConnection || event.candidate === null) {
         return;
       }
       this.sendLocalCandidate(event.candidate.toJSON());
     };
     peerConnection.ondatachannel = (event) => {
-      this.attachDataChannel(event.channel);
+      if (this.peerConnection === peerConnection) {
+        this.attachDataChannel(event.channel);
+      }
     };
 
     if (this.role === "uploader") {
-      const ctrl = peerConnection.createDataChannel("ctrl", { ordered: true });
-      const data = peerConnection.createDataChannel("data", { ordered: true });
-      this.attachCtrlChannel(ctrl);
-      this.attachDataChannel(data);
+      this.attachCtrlChannel(
+        peerConnection.createDataChannel("ctrl", { ordered: true }),
+      );
+      this.attachDataChannel(
+        peerConnection.createDataChannel("data", { ordered: true }),
+      );
     }
 
+    if (sendRebuildSignal && this.remotePeerId !== undefined) {
+      try {
+        await this.signaling.sendSignal(this.remotePeerId, { mayo: "rebuild" });
+      } catch (error) {
+        this.signalingOpen = false;
+        this.emitError(error);
+      }
+    }
     const bufferedSignals = this.bufferedSignals.splice(0);
     for (const signal of bufferedSignals) {
       await this.processSignal(signal.from, signal.payload);
     }
-    await this.maybeCreateOffer();
+    if (createInitialOffer || sendRebuildSignal) {
+      await this.maybeCreateOffer();
+    }
   }
 
   private attachDataChannel(channel: RTCDataChannel): void {
@@ -341,15 +474,29 @@ class PeerConnectionImpl implements PeerConnection {
       this.attachCtrlChannel(channel);
       return;
     }
-    if (channel.label === "data") {
-      channel.binaryType = "arraybuffer";
-      channel.bufferedAmountLowThreshold = LOW_THRESHOLD;
-      this.dataChannel = channel;
-      const onOpen = (): void => this.emit("data-open", undefined);
-      channel.addEventListener("open", onOpen);
-      if (channel.readyState === "open") {
-        onOpen();
+    if (channel.label !== "data") {
+      return;
+    }
+    channel.binaryType = "arraybuffer";
+    channel.bufferedAmountLowThreshold = LOW_THRESHOLD;
+    this.dataChannel = channel;
+    let announced = false;
+    const onOpen = (): void => {
+      if (announced || this.dataChannel !== channel) {
+        return;
       }
+      announced = true;
+      this.emit("data-open", undefined);
+    };
+    const onClose = (): void => {
+      if (this.dataChannel === channel && !this.closed) {
+        this.handleConnectionDrop("failed");
+      }
+    };
+    channel.addEventListener("open", onOpen);
+    channel.addEventListener("close", onClose);
+    if (channel.readyState === "open") {
+      onOpen();
     }
   }
 
@@ -369,13 +516,29 @@ class PeerConnectionImpl implements PeerConnection {
       }
     });
     this.ctrlProtocol.on("pong", (message) => this.emit("pong", message));
-    const pendingHandlers = this.pendingCtrlHandlers.splice(0);
-    for (const pending of pendingHandlers) {
-      this.ctrlProtocol.on(pending.type, pending.handler);
+    for (const registered of this.registeredCtrlHandlers) {
+      registered.unsubscribeCurrent?.();
+      registered.unsubscribeCurrent = this.ctrlProtocol.on(
+        registered.type,
+        registered.handler,
+      );
     }
 
-    const onOpen = (): void => this.emit("ctrl-open", undefined);
+    let announced = false;
+    const onOpen = (): void => {
+      if (announced || this.ctrlChannel !== channel) {
+        return;
+      }
+      announced = true;
+      this.emit("ctrl-open", undefined);
+    };
+    const onClose = (): void => {
+      if (this.ctrlChannel === channel && !this.closed) {
+        this.handleConnectionDrop("failed");
+      }
+    };
     channel.addEventListener("open", onOpen);
+    channel.addEventListener("close", onClose);
     if (channel.readyState === "open") {
       onOpen();
     }
@@ -383,16 +546,13 @@ class PeerConnectionImpl implements PeerConnection {
 
   private ctrlProtocolReady(): boolean {
     return (
-      this.ctrlProtocol !== undefined &&
-      this.getCtrlChannel()?.readyState === "open"
+      this.ctrlProtocol !== undefined && this.ctrlChannel?.readyState === "open"
     );
   }
 
-  private getCtrlChannel(): RTCDataChannel | undefined {
-    return this.ctrlChannel;
-  }
-
   private setRemotePeer(peerId: string): void {
+    const changed =
+      this.remotePeerId !== undefined && this.remotePeerId !== peerId;
     this.remotePeerId = peerId;
     const candidates = this.localCandidates.splice(0);
     for (const candidate of candidates) {
@@ -400,16 +560,26 @@ class PeerConnectionImpl implements PeerConnection {
         .sendSignal(peerId, candidate)
         .catch((error: unknown) => this.emitError(error));
     }
+    if (this.rebuildPending || changed) {
+      this.rebuildPending = false;
+      void this.rebuildPeerConnection(true).catch((error: unknown) =>
+        this.emitError(error),
+      );
+    }
   }
 
   private sendLocalCandidate(candidate: RTCIceCandidateInit): void {
-    if (this.remotePeerId === undefined) {
+    if (this.remotePeerId === undefined || !this.signalingOpen) {
       this.localCandidates.push(candidate);
       return;
     }
     void this.signaling
       .sendSignal(this.remotePeerId, candidate)
-      .catch((error: unknown) => this.emitError(error));
+      .catch((error: unknown) => {
+        this.signalingOpen = false;
+        this.emitError(error);
+        this.rebuildPending = true;
+      });
   }
 
   private async maybeCreateOffer(): Promise<void> {
@@ -428,6 +598,13 @@ class PeerConnectionImpl implements PeerConnection {
   }
 
   private async processSignal(from: string, payload: unknown): Promise<void> {
+    if (isRebuildPayload(payload)) {
+      // This can run while replacePeerConnection is draining buffered signals.
+      // Queue the next pass instead of awaiting the promise that owns this
+      // drain; awaiting it would make the rebuild wait for itself.
+      this.queueRebuild(false);
+      return;
+    }
     const peerConnection = this.peerConnection;
     if (peerConnection === undefined) {
       this.bufferedSignals.push({ from, payload });
@@ -475,6 +652,207 @@ class PeerConnectionImpl implements PeerConnection {
       type: description.type,
       sdp: description.sdp,
     });
+  }
+
+  private handleConnectionDrop(state: "disconnected" | "failed"): void {
+    if (this.closed) {
+      return;
+    }
+    this.emit("reconnecting", undefined);
+    if (state === "disconnected") {
+      this.startDisconnectedTimer(this.peerConnection);
+      return;
+    }
+    if (!this.signalingOpen || !this.signaling.isOpen) {
+      this.rebuildPending = true;
+      return;
+    }
+    void this.tryIceRestart();
+  }
+
+  private startDisconnectedTimer(
+    peerConnection: RTCPeerConnection | undefined,
+  ): void {
+    if (this.disconnectedTimer !== undefined || peerConnection === undefined) {
+      return;
+    }
+    this.disconnectedTimer = globalThis.setTimeout(() => {
+      this.disconnectedTimer = undefined;
+      if (
+        this.peerConnection === peerConnection &&
+        (peerConnection.iceConnectionState === "disconnected" ||
+          peerConnection.connectionState === "disconnected")
+      ) {
+        this.handleConnectionDrop("failed");
+      }
+    }, 3_000);
+  }
+
+  private async tryIceRestart(): Promise<void> {
+    if (
+      this.closed ||
+      this.recoveryInFlight ||
+      this.peerConnection === undefined
+    ) {
+      return;
+    }
+    if (this.recoveryAttempt >= 5) {
+      this.emitExhausted();
+      return;
+    }
+    this.recoveryAttempt += 1;
+    this.recoveryInFlight = true;
+    const peerConnection = this.peerConnection;
+    try {
+      peerConnection.restartIce();
+      if (this.role === "uploader") {
+        const offer = await peerConnection.createOffer({ iceRestart: true });
+        await peerConnection.setLocalDescription(offer);
+        await this.sendLocalDescription();
+      }
+      this.recoveryTimer = globalThis.setTimeout(() => {
+        this.recoveryTimer = undefined;
+        if (this.peerConnection === peerConnection) {
+          this.recoveryInFlight = false;
+          void this.scheduleRebuild();
+        }
+      }, 10_000);
+    } catch (error) {
+      this.recoveryInFlight = false;
+      this.emitError(error);
+      await this.scheduleRebuild();
+    }
+  }
+
+  private async scheduleRebuild(): Promise<void> {
+    if (this.closed) {
+      return;
+    }
+    if (this.rebuildInFlight) {
+      this.rebuildAgainPending = true;
+      this.rebuildAgainSignal = true;
+      return;
+    }
+    if (this.recoveryAttempt >= 5) {
+      this.emitExhausted();
+      return;
+    }
+    this.recoveryAttempt += 1;
+    this.recoveryInFlight = true;
+    this.emit("reconnecting", undefined);
+    const delay = Math.min(8_000, 250 * 2 ** (this.recoveryAttempt - 1));
+    await new Promise<void>((resolve) => {
+      this.recoveryTimer = globalThis.setTimeout(() => {
+        this.recoveryTimer = undefined;
+        resolve();
+      }, delay);
+    });
+    if (this.closed) {
+      return;
+    }
+    this.queueRebuild(true);
+    const rebuildPromise = this.rebuildPromise;
+    if (rebuildPromise !== undefined) {
+      await rebuildPromise;
+    }
+    const rebuiltPeer = this.peerConnection;
+    if (
+      rebuiltPeer !== undefined &&
+      rebuiltPeer.connectionState !== "connected" &&
+      this.signalingOpen &&
+      this.signaling.isOpen
+    ) {
+      this.recoveryTimer = globalThis.setTimeout(() => {
+        this.recoveryTimer = undefined;
+        if (
+          this.peerConnection === rebuiltPeer &&
+          rebuiltPeer.connectionState !== "connected"
+        ) {
+          void this.scheduleRebuild();
+        }
+      }, 10_000);
+    }
+  }
+
+  private async rebuildPeerConnection(
+    sendRebuildSignal: boolean,
+  ): Promise<void> {
+    if (this.closed || this.configuration === undefined) {
+      return;
+    }
+    this.queueRebuild(sendRebuildSignal);
+    const rebuildPromise = this.rebuildPromise;
+    if (rebuildPromise !== undefined) {
+      await rebuildPromise;
+    }
+  }
+
+  /**
+   * Starts or coalesces a rebuild. A rebuild signal can arrive while the
+   * current pass is draining buffered signals, so a second pass is recorded
+   * and run only after the current pass has fully replaced its peer.
+   */
+  private queueRebuild(sendRebuildSignal: boolean): void {
+    if (this.closed || this.configuration === undefined) {
+      return;
+    }
+    if (this.rebuildInFlight) {
+      this.rebuildAgainPending = true;
+      this.rebuildAgainSignal = sendRebuildSignal;
+      return;
+    }
+
+    this.rebuildInFlight = true;
+    const rebuild = this.runRebuildPass(sendRebuildSignal)
+      .catch((error: unknown) => this.emitError(error))
+      .finally(() => {
+        this.rebuildInFlight = false;
+        this.rebuildPromise = undefined;
+        this.recoveryInFlight = false;
+      });
+    this.rebuildPromise = rebuild;
+  }
+
+  private async runRebuildPass(sendRebuildSignal: boolean): Promise<void> {
+    let nextSendRebuildSignal = sendRebuildSignal;
+    do {
+      this.rebuildAgainPending = false;
+      this.rebuildAgainSignal = false;
+      await this.replacePeerConnection(
+        nextSendRebuildSignal,
+        this.role === "uploader",
+      );
+      nextSendRebuildSignal = this.rebuildAgainSignal;
+    } while (this.rebuildAgainPending && !this.closed);
+  }
+
+  private resetRecovery(): void {
+    this.clearRecoveryTimers();
+    this.recoveryAttempt = 0;
+    this.recoveryInFlight = false;
+    this.rebuildPending = false;
+  }
+
+  private clearRecoveryTimers(): void {
+    if (this.disconnectedTimer !== undefined) {
+      globalThis.clearTimeout(this.disconnectedTimer);
+      this.disconnectedTimer = undefined;
+    }
+    if (this.recoveryTimer !== undefined) {
+      globalThis.clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = undefined;
+    }
+  }
+
+  private emitExhausted(): void {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    this.clearRecoveryTimers();
+    this.ctrlProtocol?.dispose();
+    this.peerConnection?.close();
+    this.emit("exhausted", undefined);
   }
 
   private emitError(error: unknown): void {
