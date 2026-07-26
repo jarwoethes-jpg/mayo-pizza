@@ -5,9 +5,11 @@
   "scripts": {
     "build": "tsc --noEmit && vite build",
     "dev": "vite",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "pnpm --filter shared exec vitest run --config ../web/vitest.config.ts"
   },
   "dependencies": {
+    "@noble/hashes": "^2.2.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },

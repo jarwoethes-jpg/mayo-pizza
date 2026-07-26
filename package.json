@@ -4,12 +4,13 @@
   "type": "module",
   "scripts": {
     "check": "biome check . && pnpm --filter shared exec tsc --noEmit && pnpm --filter server exec tsc --noEmit && pnpm --filter web exec tsc --noEmit",
-    "test": "pnpm --filter shared test && pnpm --filter server test",
-    "test:e2e": "playwright test -c e2e/playwright.config.ts"
+    "test": "pnpm --filter shared test && pnpm --filter server test && pnpm --filter web test",
+    "e2e": "playwright test -c playwright.config.ts",
+    "test:e2e": "pnpm e2e"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.1.3",
-    "@playwright/test": "^1.54.1",
+    "@playwright/test": "^1.61.1",
     "typescript": "^5.8.3"
   },
   "engines": {

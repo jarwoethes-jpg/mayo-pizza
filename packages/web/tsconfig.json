@@ -2,7 +2,11 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "jsx": "react-jsx",
-    "types": ["vite/client", "node"]
+    "types": ["vite/client", "node"],
+    "paths": {
+      "shared": ["../shared/src/index.ts"],
+      "shared/*": ["../shared/src/*"]
+    }
   },
   "include": ["src", "vite.config.ts"]
 }
