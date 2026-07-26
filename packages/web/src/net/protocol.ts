@@ -46,6 +46,7 @@ export const parseCtrlMessage = (raw: unknown): CtrlMessage | undefined => {
 };
 
 export interface CtrlProtocol {
+  readonly readyState: RTCDataChannelState;
   send(message: CtrlMessage): void;
   on<T extends CtrlMessageType>(type: T, handler: CtrlHandler<T>): () => void;
   receive(raw: unknown): CtrlMessage | undefined;
@@ -81,6 +82,9 @@ export const createCtrlProtocol = (
   channel.addEventListener("message", onMessage);
 
   return {
+    get readyState(): RTCDataChannelState {
+      return channel.readyState;
+    },
     send(message) {
       const validated = ctrlMessageSchema.parse(message);
       channel.send(JSON.stringify(validated));

@@ -72,6 +72,7 @@ export interface PeerError {
 
 export interface PeerEventMap {
   "ctrl-open": undefined;
+  "data-open": undefined;
   pong: Extract<CtrlMessage, { t: "pong" }>;
   error: PeerError;
 }
@@ -91,6 +92,7 @@ export interface PeerConnection {
   readonly iceConnectionState: Observable<RTCIceConnectionState>;
   readonly ctrl: CtrlProtocol | undefined;
   readonly data: RTCDataChannel | undefined;
+  readonly maxMessageSize: number | undefined;
   readonly ready: Promise<void>;
   on<K extends PeerEventName>(
     event: K,
@@ -146,6 +148,7 @@ class PeerConnectionImpl implements PeerConnection {
     [K in PeerEventName]: Set<PeerEventListener<K>>;
   } = {
     "ctrl-open": new Set(),
+    "data-open": new Set(),
     pong: new Set(),
     error: new Set(),
   };
@@ -219,6 +222,10 @@ class PeerConnectionImpl implements PeerConnection {
 
   public get data(): RTCDataChannel | undefined {
     return this.dataChannel;
+  }
+
+  public get maxMessageSize(): number | undefined {
+    return this.peerConnection?.sctp?.maxMessageSize;
   }
 
   public start(): Promise<void> {
@@ -338,6 +345,11 @@ class PeerConnectionImpl implements PeerConnection {
       channel.binaryType = "arraybuffer";
       channel.bufferedAmountLowThreshold = LOW_THRESHOLD;
       this.dataChannel = channel;
+      const onOpen = (): void => this.emit("data-open", undefined);
+      channel.addEventListener("open", onOpen);
+      if (channel.readyState === "open") {
+        onOpen();
+      }
     }
   }
 

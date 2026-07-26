@@ -1,7 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { type ChangeEvent, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createPeer, type PeerConnection, type PeerRole } from "./net/peer";
 import { createSignalingClient } from "./net/signaling";
+import {
+  createTransferController,
+  type TransferProgress,
+  type TransferResult,
+} from "./net/transfer";
 import "./styles.css";
 
 interface RoomViewProps {
@@ -17,14 +22,43 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     useState<RTCIceConnectionState>("new");
   const [lastPong, setLastPong] = useState("—");
   const [log, setLog] = useState("Starting signaling…");
+  const [transferProgress, setTransferProgress] = useState<
+    TransferProgress | undefined
+  >(undefined);
+  const [transferResult, setTransferResult] = useState<
+    TransferResult | undefined
+  >(undefined);
+  const [bufferedAmount, setBufferedAmount] = useState(0);
+  const [maxBufferedAmount, setMaxBufferedAmount] = useState(0);
   const peerRef = useRef<PeerConnection | undefined>(undefined);
+  const transferRef = useRef<
+    ReturnType<typeof createTransferController> | undefined
+  >(undefined);
   const autoPingSent = useRef(false);
   const connectionStateRef = useRef<RTCPeerConnectionState>("new");
 
   useEffect(() => {
     const signaling = createSignalingClient();
     const peer = createPeer(role, signaling);
+    const transfer = createTransferController(role, peer, {
+      onProgress: (progress) => setTransferProgress(progress),
+      onResult: (result) => {
+        setTransferResult(result);
+        setLog(
+          result.verified
+            ? "Transfer verified."
+            : "Transfer failed integrity verification.",
+        );
+      },
+      onError: (error) => setLog(error.message),
+      onCancelled: (reason) => setLog(reason),
+      onBufferedAmount: (amount, max) => {
+        setBufferedAmount(amount);
+        setMaxBufferedAmount(max);
+      },
+    });
     peerRef.current = peer;
+    transferRef.current = transfer;
 
     const sendAutoPing = (): void => {
       if (
@@ -87,9 +121,11 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       unsubscribeCtrl();
       unsubscribePong();
       unsubscribeError();
+      transfer.destroy();
       peer.close();
       signaling.close();
       peerRef.current = undefined;
+      transferRef.current = undefined;
     };
   }, [role, slug]);
 
@@ -109,6 +145,24 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       );
     }
   };
+
+  const handleFileChange = (event: ChangeEvent<HTMLInputElement>): void => {
+    const file = event.currentTarget.files?.[0];
+    if (file === undefined || transferRef.current === undefined) {
+      return;
+    }
+    setTransferResult(undefined);
+    void transferRef.current.startSend(file).catch((error: unknown) => {
+      setLog(
+        error instanceof Error ? error.message : "Could not start transfer.",
+      );
+    });
+  };
+
+  const progressText =
+    transferProgress === undefined
+      ? "—"
+      : `${transferProgress.bytesDone}/${transferProgress.totalBytes} bytes · ${Math.round(transferProgress.bytesPerSec)} B/s`;
 
   return (
     <main className="flex min-h-screen items-center justify-center p-6">
@@ -140,18 +194,45 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
             <dt>Last pong</dt>
             <dd data-testid="last-pong">{lastPong}</dd>
           </div>
+          <div className="flex justify-between gap-4 border-b border-[var(--mp-olive)]/10 pb-2">
+            <dt>Transfer</dt>
+            <dd data-testid="progress">{progressText}</dd>
+          </div>
+          <div className="flex justify-between gap-4 border-b border-[var(--mp-olive)]/10 pb-2">
+            <dt>Buffered</dt>
+            <dd data-testid="buffered-amount">{bufferedAmount}</dd>
+          </div>
         </dl>
         {role === "uploader" && (
-          <button
-            className="mt-8 rounded-full bg-[var(--mp-olive)] px-5 py-3 text-[var(--mp-cream)] disabled:cursor-not-allowed disabled:opacity-40"
-            data-testid="ping"
-            disabled={connectionState !== "connected"}
-            onClick={sendPing}
-            type="button"
-          >
-            Send ping
-          </button>
+          <div className="mt-8 flex flex-wrap gap-3">
+            <button
+              className="rounded-full bg-[var(--mp-olive)] px-5 py-3 text-[var(--mp-cream)] disabled:cursor-not-allowed disabled:opacity-40"
+              data-testid="ping"
+              disabled={connectionState !== "connected"}
+              onClick={sendPing}
+              type="button"
+            >
+              Send ping
+            </button>
+            <label className="cursor-pointer rounded-full border border-[var(--mp-olive)] px-5 py-3">
+              Choose file
+              <input
+                className="sr-only"
+                data-testid="file-input"
+                onChange={handleFileChange}
+                type="file"
+              />
+            </label>
+          </div>
         )}
+        <p data-testid="transfer-result" className="mt-4 break-all text-sm">
+          {transferResult === undefined
+            ? "Transfer result: pending"
+            : `Transfer result: verified=${transferResult.verified} sha256=${transferResult.sha256}`}
+        </p>
+        <p className="mt-2 text-xs opacity-60">
+          Peak buffered: {maxBufferedAmount} bytes
+        </p>
         <p data-testid="log" className="mt-6 text-sm opacity-70">
           {log}
         </p>
