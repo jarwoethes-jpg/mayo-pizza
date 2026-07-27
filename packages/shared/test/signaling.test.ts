@@ -12,6 +12,8 @@ const validMessages = [
   { t: "signal", to: "peer-2", payload: { type: "offer", sdp: "opaque" } },
   { t: "ice-config" },
   { t: "close" },
+  { t: "stat", event: "connected", route: "direct" },
+  { t: "stat", event: "connected", route: "relay" },
   { t: "created", slug: "mushroom-olive-basil-42", uploaderToken: "token" },
   { t: "joined", peerId: "peer-2", role: "downloader" },
   { t: "peer-joined", peerId: "peer-2" },
@@ -37,6 +39,8 @@ const invalidMessages = [
   { t: "peer-joined", peerId: 7 },
   { t: "peer-left" },
   { t: "signal", from: "peer-2" },
+  { t: "stat", event: "connected", route: "other" },
+  { t: "stat", event: "connected", route: "direct", extra: true },
   { t: "ice-config", iceServers: "stun:mayo.pizza:3478" },
   { t: "error", code: "NOT_A_REAL_CODE", message: "nope" },
 ] as const;

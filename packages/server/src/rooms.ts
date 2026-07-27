@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import type WebSocket from "ws";
+import WebSocket from "ws";
 
 const crustTerms = [
   "artisan",
@@ -145,6 +145,23 @@ export const PIZZA_WORDLIST: readonly string[] = Object.freeze(
 // 4,096^3 * 100 possible slugs = 2^42.64, keeping the capability above 40 bits.
 export const ROOM_TTL_MS = 30 * 60 * 1000;
 export const ROOM_REAPER_INTERVAL_MS = 60 * 1000;
+export const ROOM_AUTH_FAILURE_LIMIT = 5;
+
+const isPositiveSafeInteger = (value: number): boolean =>
+  Number.isSafeInteger(value) && value > 0;
+
+/** Parses a positive integer room TTL, falling back for invalid values. */
+export const parseRoomTtlEnv = (
+  value: string | undefined,
+  fallback: number,
+): number => {
+  const trimmed = value?.trim();
+  if (trimmed === undefined || !/^\d+$/.test(trimmed)) {
+    return fallback;
+  }
+  const parsed = Number(trimmed);
+  return isPositiveSafeInteger(parsed) ? parsed : fallback;
+};
 
 /** Generates a capability slug without modulo-biased random selection. */
 export const generateSlug = (): string => {
@@ -164,7 +181,12 @@ export interface Room {
   passwordHash?: string;
   createdAt: number;
   lastSeenAt: number;
+  passwordFailures: number;
+  tokenFailures: number;
+  lockedAt?: number;
 }
+
+export type RoomReapedHandler = (room: Room, roomCount: number) => void;
 
 export interface RoomRegistry {
   rooms: Map<string, Room>;
@@ -178,6 +200,11 @@ export interface RoomRegistry {
   touchRoom: (room: Room, at?: number) => void;
   addPeer: (room: Room, peerId: string, socket: WebSocket) => void;
   removePeer: (room: Room, peerId: string) => void;
+  recordPasswordFailure: (room: Room, at?: number) => boolean;
+  recordTokenFailure: (room: Room, at?: number) => boolean;
+  resetPasswordFailures: (room: Room) => void;
+  resetTokenFailures: (room: Room) => void;
+  onRoomReaped?: RoomReapedHandler;
   dispose: () => void;
 }
 
@@ -185,6 +212,7 @@ export interface RoomRegistryOptions {
   now?: () => number;
   ttlMs?: number;
   startReaper?: boolean;
+  onRoomReaped?: RoomReapedHandler;
 }
 
 /** Creates the in-memory room map and its idle-room reaper. */
@@ -219,6 +247,8 @@ export const createRoomRegistry = (
         peers: new Map(),
         createdAt: timestamp,
         lastSeenAt: timestamp,
+        passwordFailures: 0,
+        tokenFailures: 0,
       };
       if (passwordHash !== undefined) {
         room.passwordHash = passwordHash;
@@ -243,12 +273,42 @@ export const createRoomRegistry = (
       // Keep the capability alive after a transient disconnect; the TTL
       // reaper, rather than peer count, owns room deletion.
     },
+    recordPasswordFailure: (room, at = now()) => {
+      if (room.lockedAt !== undefined) {
+        return false;
+      }
+      room.passwordFailures += 1;
+      if (
+        room.passwordFailures >= ROOM_AUTH_FAILURE_LIMIT &&
+        room.lockedAt === undefined
+      ) {
+        room.lockedAt = at;
+        return true;
+      }
+      return false;
+    },
+    recordTokenFailure: (room) => {
+      room.tokenFailures += 1;
+      // WHY: uploader tokens are random 32-byte capabilities; per-IP joins
+      // already bound guessing, so token failures must not brick the room.
+      return false;
+    },
+    resetPasswordFailures: (room) => {
+      room.passwordFailures = 0;
+    },
+    resetTokenFailures: (room) => {
+      room.tokenFailures = 0;
+    },
     dispose: () => {
       if (timer !== undefined) {
         clearInterval(timer);
       }
     },
   };
+
+  if (options.onRoomReaped !== undefined) {
+    registry.onRoomReaped = options.onRoomReaped;
+  }
 
   return registry;
 };
@@ -265,9 +325,19 @@ export const reapIdleRooms = (
     }
 
     for (const peer of room.peers.values()) {
-      peer.close(1000, "Room expired");
+      if (peer.readyState === WebSocket.OPEN || peer.readyState === undefined) {
+        peer.send(
+          JSON.stringify({
+            t: "error",
+            code: "BAD_SLUG",
+            message: "That room has expired.",
+          }),
+        );
+      }
+      peer.close(1001, "Room expired");
     }
     registry.rooms.delete(slug);
+    registry.onRoomReaped?.(room, registry.rooms.size);
     reaped += 1;
   }
   return reaped;

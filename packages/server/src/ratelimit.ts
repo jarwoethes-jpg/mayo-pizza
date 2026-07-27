@@ -37,6 +37,36 @@ const limits: Record<RateLimitAction, { count: number; windowMs: number }> = {
   message: { count: 100, windowMs: MINUTE_MS },
 };
 
+const isPositiveSafeInteger = (value: number): boolean =>
+  Number.isSafeInteger(value) && value > 0;
+
+/**
+ * Parses a positive integer rate-limit environment value.
+ *
+ * Zero, negative values, decimals, empty strings, and malformed values are
+ * invalid and return the supplied default so a typo cannot disable limiting.
+ */
+export const parseRateLimitEnv = (
+  value: string | undefined,
+  fallback: number,
+): number => {
+  const trimmed = value?.trim();
+  if (trimmed === undefined || !/^\d+$/.test(trimmed)) {
+    return fallback;
+  }
+  const parsed = Number(trimmed);
+  return isPositiveSafeInteger(parsed) ? parsed : fallback;
+};
+
+/** Parses all supported rate-limit environment overrides. */
+export const parseRateLimitOverrides = (
+  env: NodeJS.ProcessEnv = process.env,
+): RateLimiterOptions => ({
+  createLimit: parseRateLimitEnv(env.RATE_LIMIT_CREATE, limits.create.count),
+  joinLimit: parseRateLimitEnv(env.RATE_LIMIT_JOIN, limits.join.count),
+  messageLimit: parseRateLimitEnv(env.RATE_LIMIT_MESSAGE, limits.message.count),
+});
+
 const normaliseAddress = (address: string): string =>
   address.trim().replace(/^::ffff:/i, "");
 
@@ -67,8 +97,14 @@ export const getClientIp = (
     return remote;
   }
 
-  const header = Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor;
-  const forwardedClient = header?.split(",")[0]?.trim();
+  const header = Array.isArray(forwardedFor)
+    ? forwardedFor.join(",")
+    : forwardedFor;
+  const forwardedClient = header
+    ?.split(",")
+    .map((entry) => entry.trim())
+    .reverse()
+    .find((entry) => entry !== "");
   return forwardedClient === undefined || forwardedClient === ""
     ? remote
     : normaliseAddress(forwardedClient);
@@ -83,12 +119,21 @@ export const createRateLimiter = (
     { count: number; windowMs: number }
   > = {
     create: {
-      count: options.createLimit ?? limits.create.count,
+      count: isPositiveSafeInteger(options.createLimit ?? 0)
+        ? (options.createLimit as number)
+        : limits.create.count,
       windowMs: HOUR_MS,
     },
-    join: { count: options.joinLimit ?? limits.join.count, windowMs: HOUR_MS },
+    join: {
+      count: isPositiveSafeInteger(options.joinLimit ?? 0)
+        ? (options.joinLimit as number)
+        : limits.join.count,
+      windowMs: HOUR_MS,
+    },
     message: {
-      count: options.messageLimit ?? limits.message.count,
+      count: isPositiveSafeInteger(options.messageLimit ?? 0)
+        ? (options.messageLimit as number)
+        : limits.message.count,
       windowMs: MINUTE_MS,
     },
   };

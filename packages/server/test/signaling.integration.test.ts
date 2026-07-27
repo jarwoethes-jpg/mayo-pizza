@@ -1,7 +1,9 @@
 import { createHmac } from "node:crypto";
 import { existsSync } from "node:fs";
+import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import argon2 from "argon2";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { createServer, type ServerHandle } from "../src/index.js";
 import { createTurnConfig } from "../src/turn.js";
@@ -169,6 +171,27 @@ describe("localhost signaling server", () => {
         payload: { x: 1 },
       });
 
+      downloader.send(
+        JSON.stringify({ t: "stat", event: "connected", route: "direct" }),
+      );
+      const metricsInit: RequestInit = {};
+      if (process.env.METRICS_TOKEN !== undefined) {
+        metricsInit.headers = {
+          authorization: `Bearer ${process.env.METRICS_TOKEN}`,
+        };
+      }
+      const metrics = await fetch(
+        `http://127.0.0.1:${port}/metrics`,
+        metricsInit,
+      );
+      expect(metrics.status).toBe(200);
+      const metricsBody = await metrics.text();
+      expect(metricsBody).toContain("mayo_rooms_active 1");
+      expect(metricsBody).toContain("mayo_peers_connected 2");
+      expect(metricsBody).toContain("mayo_transfers_active 1");
+      expect(metricsBody).toContain("mayo_rooms_created_total 1");
+      expect(metricsBody).toContain('mayo_connections_total{route="direct"} 1');
+
       const iceConfigPromise = nextMessage(downloader);
       downloader.send(JSON.stringify({ t: "ice-config" }));
       const iceConfig = await iceConfigPromise;
@@ -311,5 +334,255 @@ describe("localhost signaling server", () => {
       rejoinedFrames?.dispose();
       rejoinedUploader?.close();
     }
+  });
+
+  it("locks password rooms after five failures without verifying after lockout", async () => {
+    const url = `ws://127.0.0.1:${port}/ws`;
+    const uploader = await openSocket(url);
+    const downloader = await openSocket(url);
+    const verify = vi.spyOn(argon2, "verify");
+
+    try {
+      const createdPromise = nextMessage(uploader);
+      uploader.send(JSON.stringify({ t: "create", password: "secret" }));
+      const created = await createdPromise;
+      const slug = stringField(created, "slug");
+
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const errorPromise = nextMessage(downloader);
+        downloader.send(JSON.stringify({ t: "join", slug, password: "wrong" }));
+        expect(await errorPromise).toMatchObject({
+          t: "error",
+          code: "BAD_PASSWORD",
+        });
+      }
+
+      const joinedPromise = nextMessage(downloader);
+      const peerJoinedPromise = nextMessage(uploader);
+      downloader.send(JSON.stringify({ t: "join", slug, password: "secret" }));
+      expect(await joinedPromise).toMatchObject({
+        t: "joined",
+        role: "downloader",
+      });
+      await peerJoinedPromise;
+
+      const lockedUploader = await openSocket(url);
+      const lockedDownloader = await openSocket(url);
+      try {
+        const lockedCreatedPromise = nextMessage(lockedUploader);
+        lockedUploader.send(
+          JSON.stringify({ t: "create", password: "secret" }),
+        );
+        const lockedCreated = await lockedCreatedPromise;
+        const lockedSlug = stringField(lockedCreated, "slug");
+
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          const errorPromise = nextMessage(lockedDownloader);
+          lockedDownloader.send(
+            JSON.stringify({ t: "join", slug: lockedSlug, password: "wrong" }),
+          );
+          expect(await errorPromise).toMatchObject({
+            t: "error",
+            code: "BAD_PASSWORD",
+          });
+        }
+
+        const verifiesBeforeLockedJoin = verify.mock.calls.length;
+        const lockedErrorPromise = nextMessage(lockedDownloader);
+        lockedDownloader.send(
+          JSON.stringify({ t: "join", slug: lockedSlug, password: "secret" }),
+        );
+        expect(await lockedErrorPromise).toMatchObject({
+          t: "error",
+          code: "BAD_PASSWORD",
+        });
+        expect(verify.mock.calls.length).toBe(verifiesBeforeLockedJoin);
+      } finally {
+        lockedUploader.close();
+        lockedDownloader.close();
+      }
+    } finally {
+      verify.mockRestore();
+      uploader.close();
+      downloader.close();
+    }
+  });
+
+  it("does not let five bad uploader tokens block a correct password join", async () => {
+    const url = `ws://127.0.0.1:${port}/ws`;
+    const uploader = await openSocket(url);
+    const downloader = await openSocket(url);
+
+    try {
+      const createdPromise = nextMessage(uploader);
+      uploader.send(JSON.stringify({ t: "create", password: "secret" }));
+      const created = await createdPromise;
+      const slug = stringField(created, "slug");
+
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const errorPromise = nextMessage(downloader);
+        downloader.send(
+          JSON.stringify({
+            t: "join",
+            slug,
+            uploaderToken: `bogus-token-${attempt}`,
+          }),
+        );
+        expect(await errorPromise).toMatchObject({
+          t: "error",
+          code: "BAD_PASSWORD",
+        });
+      }
+
+      const joinedPromise = nextMessage(downloader);
+      const peerJoinedPromise = nextMessage(uploader);
+      downloader.send(JSON.stringify({ t: "join", slug, password: "secret" }));
+      expect(await joinedPromise).toMatchObject({
+        t: "joined",
+        role: "downloader",
+      });
+      await peerJoinedPromise;
+    } finally {
+      uploader.close();
+      downloader.close();
+    }
+  });
+
+  it("keeps the uploader token usable after room lockout and caps token failures separately", async () => {
+    const url = `ws://127.0.0.1:${port}/ws`;
+    const uploader = await openSocket(url);
+    const downloader = await openSocket(url);
+    let rejoinedUploader: WebSocket | undefined;
+
+    try {
+      const createdPromise = nextMessage(uploader);
+      uploader.send(JSON.stringify({ t: "create", password: "secret" }));
+      const created = await createdPromise;
+      const slug = stringField(created, "slug");
+      const uploaderToken = stringField(created, "uploaderToken");
+
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const errorPromise = nextMessage(downloader);
+        downloader.send(JSON.stringify({ t: "join", slug, password: "wrong" }));
+        expect(await errorPromise).toMatchObject({
+          t: "error",
+          code: "BAD_PASSWORD",
+        });
+      }
+
+      const uploaderClose = nextClose(uploader);
+      uploader.close();
+      await uploaderClose;
+      rejoinedUploader = await openSocket(url);
+      const joinedPromise = nextMessage(rejoinedUploader);
+      rejoinedUploader.send(JSON.stringify({ t: "join", slug, uploaderToken }));
+      expect(await joinedPromise).toMatchObject({
+        t: "joined",
+        role: "uploader",
+      });
+    } finally {
+      uploader.close();
+      downloader.close();
+      rejoinedUploader?.close();
+    }
+  });
+
+  it("emits allowlisted JSON logs without room capabilities", async () => {
+    vi.stubEnv("LOG_LEVEL", "info");
+    const output: string[] = [];
+    const logStream = new Writable({
+      write(chunk, _encoding, callback) {
+        output.push(chunk.toString());
+        callback();
+      },
+    });
+    const loggedServer = createServer({
+      host: "127.0.0.1",
+      logStream,
+      turnConfig: createTurnConfig({
+        TURN_STATIC_SECRET: "integration-secret",
+      }),
+    });
+    const loggedPort = await loggedServer.listen(0);
+    const url = `ws://127.0.0.1:${loggedPort}/ws`;
+    const uploader = await openSocket(url);
+    const downloader = await openSocket(url);
+    let roomSlug = "";
+    let uploaderToken = "";
+
+    try {
+      const createdPromise = nextMessage(uploader);
+      uploader.send(JSON.stringify({ t: "create", password: "secret" }));
+      const created = await createdPromise;
+      roomSlug = stringField(created, "slug");
+      uploaderToken = stringField(created, "uploaderToken");
+      const joinedPromise = nextMessage(downloader);
+      const peerJoinedPromise = nextMessage(uploader);
+      downloader.send(
+        JSON.stringify({ t: "join", slug: roomSlug, password: "secret" }),
+      );
+      const joined = await joinedPromise;
+      const downloaderPeerId = stringField(joined, "peerId");
+      await peerJoinedPromise;
+      const signalPromise = nextMessage(downloader);
+      uploader.send(
+        JSON.stringify({
+          t: "signal",
+          to: downloaderPeerId,
+          payload: { x: 1 },
+        }),
+      );
+      await signalPromise;
+      const downloaderClose = nextClose(downloader);
+      downloader.send(JSON.stringify({ t: "close" }));
+      await downloaderClose;
+      const uploaderClose = nextClose(uploader);
+      uploader.send(JSON.stringify({ t: "close" }));
+      await uploaderClose;
+    } finally {
+      uploader.close();
+      downloader.close();
+      await loggedServer.close();
+      vi.unstubAllEnvs();
+    }
+
+    const lines = output
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const allowedKeys = new Set([
+      "ts",
+      "level",
+      "event",
+      "peerId",
+      "ip",
+      "roomCount",
+      "code",
+    ]);
+    expect(lines.length).toBeGreaterThan(0);
+    const eventLines = lines.filter((line) => typeof line.event === "string");
+    expect(eventLines.length).toBeGreaterThan(0);
+    for (const line of eventLines) {
+      expect(Object.keys(line).every((key) => allowedKeys.has(key))).toBe(true);
+    }
+    for (const line of lines) {
+      if (typeof line.msg === "string") {
+        expect(line.msg).not.toContain(roomSlug);
+        expect(line.msg).not.toContain(uploaderToken);
+      }
+    }
+    const events = new Set(eventLines.map((line) => line.event));
+    expect([...events]).toEqual(
+      expect.arrayContaining([
+        "ws_open",
+        "ws_close",
+        "room_created",
+        "room_joined",
+        "room_left",
+      ]),
+    );
+    const logText = JSON.stringify(lines);
+    expect(logText).not.toContain(roomSlug);
+    expect(logText).not.toContain(uploaderToken);
   });
 });

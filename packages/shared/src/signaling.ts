@@ -52,6 +52,13 @@ export const signalingMessageSchema = z.union([
     .strict(),
   z
     .object({
+      t: z.literal("stat"),
+      event: z.literal("connected"),
+      route: z.enum(["direct", "relay"]),
+    })
+    .strict(),
+  z
+    .object({
       t: z.literal("created"),
       slug: z.string(),
       uploaderToken: z.string(),
