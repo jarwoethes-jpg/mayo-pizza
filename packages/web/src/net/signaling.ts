@@ -140,6 +140,20 @@ interface PendingRequestHandle<T extends SignalingServerMessage> {
   cancel: () => void;
 }
 
+const defaultSetTimer = (
+  callback: Parameters<typeof globalThis.setTimeout>[0],
+  delay?: number,
+): ReturnType<typeof globalThis.setTimeout> =>
+  globalThis.setTimeout(callback, delay) as ReturnType<
+    typeof globalThis.setTimeout
+  >;
+
+const defaultClearTimer = (
+  timer: ReturnType<typeof globalThis.setTimeout>,
+): void => {
+  globalThis.clearTimeout(timer);
+};
+
 export class SignalingClient {
   private readonly listeners: {
     [K in EventName]: Set<EventListener<K>>;
@@ -191,8 +205,11 @@ export class SignalingClient {
     this.webSocketFactory =
       options.webSocketFactory ?? ((url) => new WebSocket(url));
     this.random = options.random ?? Math.random;
-    this.setTimer = options.setTimeout ?? globalThis.setTimeout;
-    this.clearTimer = options.clearTimeout ?? globalThis.clearTimeout;
+    this.setTimer =
+      options.setTimeout ?? (defaultSetTimer as typeof globalThis.setTimeout);
+    this.clearTimer =
+      options.clearTimeout ??
+      (defaultClearTimer as typeof globalThis.clearTimeout);
     if (typeof window !== "undefined") {
       window.addEventListener("online", this.onlineListener);
     }

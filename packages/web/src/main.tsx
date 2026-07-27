@@ -2,6 +2,7 @@ import {
   type ChangeEvent,
   type DragEvent,
   useEffect,
+  useReducer,
   useRef,
   useState,
 } from "react";
@@ -20,11 +21,16 @@ import {
   type TransferResult,
 } from "./net/transfer";
 import { getSinkOverride, getSinkStrategy } from "./sink";
+import { getFailureCopy } from "./ui/copy";
+import { formatBytes, formatEta, formatTransferRate } from "./ui/format";
+import { initialTransferUiState, transferUiReducer } from "./ui/state";
 import "./styles.css";
 
 interface RoomViewProps {
   role: PeerRole;
   slug?: string;
+  /** Passwords are intentionally URL-seeded because room creation is automatic. */
+  password?: string;
 }
 
 type SessionStatus =
@@ -34,7 +40,54 @@ type SessionStatus =
   | "resuming"
   | "failed";
 
-const RoomView = ({ role, slug }: RoomViewProps) => {
+interface StagedSelection {
+  kind: "file" | "folder";
+  name: string;
+  size: number;
+  fileCount?: number;
+}
+
+const getSessionCopy = (
+  status: SessionStatus,
+  role: PeerRole,
+  reason?: string,
+): string => {
+  if (status === "failed") {
+    return getFailureCopy(reason ?? "connection failed", role).message;
+  }
+  if (status === "connecting") {
+    return role === "uploader"
+      ? "We’re warming up the oven and getting your private room ready."
+      : "We’re finding the room and getting your private connection ready.";
+  }
+  if (status === "reconnecting") {
+    return "Slice dropped! Our connection got a little messy. We’re getting a fresh one ready, but in the meantime, check your Wi-Fi!";
+  }
+  if (status === "resuming") {
+    return "The connection is back. We’re stitching your slice back together now.";
+  }
+  return role === "uploader"
+    ? "Your room is ready. Drop a file anywhere or choose a slice to send it straight to your receiver."
+    : "You’re in. We’re waiting for the sender to drop a slice.";
+};
+
+const getTechnicalShareUrl = (slug: string): string =>
+  new URL(`/${encodeURIComponent(slug)}`, window.location.origin).toString();
+
+const escapeAttribute = (value: string): string =>
+  value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+
+const addQrAccessibility = (svg: string, url: string): string =>
+  svg.replace(
+    "<svg",
+    `<svg role="img" aria-label="QR code for ${escapeAttribute(url)}"`,
+  );
+
+const RoomView = ({ role, slug, password }: RoomViewProps) => {
   const [roomSlug, setRoomSlug] = useState(slug);
   const [connectionState, setConnectionState] =
     useState<RTCPeerConnectionState>("new");
@@ -58,6 +111,30 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
   );
   const [bufferedAmount, setBufferedAmount] = useState(0);
   const [maxBufferedAmount, setMaxBufferedAmount] = useState(0);
+  const [transferUi, dispatchTransferUi] = useReducer(
+    transferUiReducer,
+    initialTransferUiState,
+  );
+  const [stagedSelection, setStagedSelection] = useState<
+    StagedSelection | undefined
+  >(undefined);
+  const [sessionFailureReason, setSessionFailureReason] = useState<
+    string | undefined
+  >(undefined);
+  const [sessionNotice, setSessionNotice] = useState<string | undefined>(
+    undefined,
+  );
+  const [announcement, setAnnouncement] = useState(
+    "Welcome in. Drop a file anywhere or choose a slice to get started.",
+  );
+  const [isDragging, setIsDragging] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+  const [qrSvg, setQrSvg] = useState<string | undefined>(undefined);
+  const [qrLoading, setQrLoading] = useState(false);
+  const [passwordDraft, setPasswordDraft] = useState("");
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const peerRef = useRef<PeerConnection | undefined>(undefined);
   const transferRef = useRef<
     ReturnType<typeof createTransferController> | undefined
@@ -65,6 +142,8 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
   const autoPingSent = useRef(false);
   const connectionStateRef = useRef<RTCPeerConnectionState>("new");
   const resumePendingRef = useRef(false);
+  const dragDepthRef = useRef(0);
+  const progressAnnouncedRef = useRef(false);
 
   useEffect(() => {
     const signaling = createSignalingClient();
@@ -72,13 +151,28 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     const transfer = createTransferController(role, peer, {
       onProgress: (progress) => {
         setTransferProgress(progress);
+        dispatchTransferUi({ type: "progress" });
+        if (progress.bytesDone >= progress.totalBytes) {
+          progressAnnouncedRef.current = true;
+          setAnnouncement("The slice made it. We’re checking every crumb now.");
+        } else if (!progressAnnouncedRef.current) {
+          progressAnnouncedRef.current = true;
+          setAnnouncement(
+            "Your slice is on the move. Keep this tab open while it travels.",
+          );
+        }
         if (resumePendingRef.current && progress.side === "receiver") {
           resumePendingRef.current = false;
           setSessionStatus("connected");
+          setSessionNotice(undefined);
         }
       },
       onManifest: (manifest) => {
         setPendingManifest(manifest);
+        setSessionNotice(undefined);
+        setAnnouncement(
+          "A fresh slice just landed. Take a look, then grab it when you’re ready.",
+        );
         const override = getSinkOverride();
         if (override !== undefined && override.autoAccept !== false) {
           transferRef.current?.acceptTransfer();
@@ -87,23 +181,39 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       onResult: (result) => {
         setPendingManifest(undefined);
         setTransferResult(result);
-        setLog(
-          result.verified
-            ? "Transfer verified."
-            : "Transfer failed integrity verification.",
-        );
+        dispatchTransferUi({ type: "result", result });
+        if (result.verified) {
+          setAnnouncement("Slice landed! It’s verified and ready to enjoy.");
+          setLog("Transfer verified.");
+        } else {
+          setAnnouncement(
+            "Slice dropped! The bytes did not line up on the way over. Try that slice again.",
+          );
+          setLog("Transfer failed integrity verification.");
+        }
       },
       onResumeRequested: () => {
         resumePendingRef.current = true;
         setSessionStatus("resuming");
-        setLog("Connection's back. Resuming your slice…");
+        setSessionNotice(undefined);
+        setAnnouncement(
+          "The connection is back. We’re stitching your slice back together now.",
+        );
+        setLog("Connection’s back. Resuming your slice…");
       },
       onError: (error) => {
         resumePendingRef.current = false;
         setSessionStatus("failed");
+        setSessionFailureReason(error.message);
+        dispatchTransferUi({ type: "error", message: error.message });
+        setAnnouncement(getFailureCopy(error.message, role).message);
         setLog(error.message);
       },
-      onCancelled: (reason) => setLog(reason),
+      onCancelled: (reason) => {
+        dispatchTransferUi({ type: "cancel" });
+        setAnnouncement(getFailureCopy(reason, role).message);
+        setLog(reason);
+      },
       onBufferedAmount: (amount, max) => {
         setBufferedAmount(amount);
         setMaxBufferedAmount(max);
@@ -134,12 +244,16 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       if (state === "connected") {
         if (!resumePendingRef.current) {
           setSessionStatus("connected");
+          setSessionNotice(undefined);
         }
         setLog("Connected.");
       } else if (state === "new" || state === "connecting") {
         setSessionStatus("connecting");
       } else if (state === "disconnected" || state === "failed") {
         setSessionStatus("reconnecting");
+        setAnnouncement(
+          "Slice dropped! Our connection got a little messy. We’re getting a fresh one ready, but in the meantime, check your Wi-Fi!",
+        );
       }
     });
     const unsubscribeIce = peer.iceConnectionState.subscribe(
@@ -151,17 +265,42 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     });
     const unsubscribeReconnecting = peer.on("reconnecting", () => {
       setSessionStatus("reconnecting");
+      setSessionNotice(undefined);
+      setAnnouncement(
+        "Slice dropped! Our connection got a little messy. We’re getting a fresh one ready, but in the meantime, check your Wi-Fi!",
+      );
       setLog("Our connection hit a rough patch. Reconnecting…");
     });
     const unsubscribeResuming = peer.on("resuming", () => {
       resumePendingRef.current = true;
       setSessionStatus("resuming");
-      setLog("Connection's back. Resuming your slice…");
+      setSessionNotice(undefined);
+      setAnnouncement(
+        "The connection is back. We’re stitching your slice back together now.",
+      );
+      setLog("Connection’s back. Resuming your slice…");
     });
     const unsubscribeExhausted = peer.on("exhausted", () => {
       resumePendingRef.current = false;
       setSessionStatus("failed");
-      setLog("Slice dropped. We couldn't recover the connection.");
+      setSessionFailureReason("connection recovery exhausted");
+      setAnnouncement(
+        getFailureCopy("connection recovery exhausted", role).message,
+      );
+      setLog("Slice dropped. We couldn’t recover the connection.");
+    });
+    const unsubscribePeerGone = peer.on("peer-gone", () => {
+      const message =
+        role === "downloader"
+          ? "Slice is waiting! The sender stepped away before the handoff finished. Ask them to open the room again for a fresh slice."
+          : "Slice is waiting! The receiver stepped away before the handoff finished. We’ll be ready when they return.";
+      setSessionNotice(message);
+      setAnnouncement(message);
+      setLog(
+        role === "downloader"
+          ? "Sender left the room."
+          : "Receiver left the room.",
+      );
     });
     const unsubscribePong = peer.on("pong", ({ nonce }) => {
       setLastPong(nonce);
@@ -170,6 +309,8 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     const unsubscribeError = peer.on("error", ({ error }) => {
       if (error.message.startsWith("BAD_SLUG:")) {
         setSessionStatus("failed");
+        setSessionFailureReason(error.message);
+        setAnnouncement(getFailureCopy(error.message, role).message);
       }
       setLog(error.message);
     });
@@ -183,18 +324,23 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
 
     const run = async (): Promise<void> => {
       try {
+        const roomPassword = password?.trim() || undefined;
         if (role === "uploader") {
-          const created = await signaling.create();
+          const created = await signaling.create(roomPassword);
           setRoomSlug(created.slug);
           setLog("Room created. Waiting for a receiver…");
         } else if (slug !== undefined) {
-          await signaling.join(slug);
+          await signaling.join(slug, roomPassword);
           setLog("Joined room. Waiting for the sender…");
         }
         await peer.ready;
       } catch (error) {
         setSessionStatus("failed");
-        setLog(error instanceof Error ? error.message : "Connection failed.");
+        const message =
+          error instanceof Error ? error.message : "Connection failed.";
+        setSessionFailureReason(message);
+        setAnnouncement(getFailureCopy(message, role).message);
+        setLog(message);
       }
     };
     void run();
@@ -206,6 +352,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       unsubscribeReconnecting();
       unsubscribeResuming();
       unsubscribeExhausted();
+      unsubscribePeerGone();
       unsubscribePong();
       unsubscribeError();
       if (window.__MAYO_DEBUG_DROP__ === debugDrop) {
@@ -217,7 +364,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       peerRef.current = undefined;
       transferRef.current = undefined;
     };
-  }, [role, slug]);
+  }, [password, role, slug]);
 
   const sendPing = (): void => {
     const peer = peerRef.current;
@@ -236,7 +383,15 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     }
   };
 
+  const resetTransferPresentation = (): void => {
+    setTransferProgress(undefined);
+    setTransferResult(undefined);
+    dispatchTransferUi({ type: "reset" });
+    progressAnnouncedRef.current = false;
+  };
+
   const acceptTransfer = (): void => {
+    // This must stay the first call in the click handler: FSA needs the original gesture.
     transferRef.current?.acceptTransfer();
     setPendingManifest(undefined);
   };
@@ -251,31 +406,57 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     if (transfer === undefined) {
       return;
     }
-    setTransferResult(undefined);
+    const files = collection.entries.filter(
+      (entry) => entry.file !== undefined,
+    );
+    setStagedSelection({
+      kind: "folder",
+      name: `${collection.rootName}.zip`,
+      size: files.reduce((total, entry) => total + (entry.file?.size ?? 0), 0),
+      fileCount: files.length,
+    });
+    resetTransferPresentation();
     setSkippedCount(collection.skippedCount);
+    setAnnouncement(
+      `Nice folder! ${collection.rootName} is staged and ready to travel.`,
+    );
+    dispatchTransferUi({ type: "stage" });
     try {
       await transfer.startFolderSend(collection.entries, collection.rootName);
     } catch (error: unknown) {
-      setLog(
+      const message =
         error instanceof Error
           ? error.message
-          : "Could not start folder transfer.",
-      );
+          : "Could not start folder transfer.";
+      dispatchTransferUi({ type: "error", message });
+      setAnnouncement(getFailureCopy(message, role).message);
+      setLog(message);
     }
+  };
+
+  const startFileTransfer = (file: File): void => {
+    if (transferRef.current === undefined) {
+      return;
+    }
+    setStagedSelection({ kind: "file", name: file.name, size: file.size });
+    resetTransferPresentation();
+    setSkippedCount(undefined);
+    setAnnouncement(`Nice slice! ${file.name} is staged and ready to travel.`);
+    dispatchTransferUi({ type: "stage" });
+    void transferRef.current.startSend(file).catch((error: unknown) => {
+      const message =
+        error instanceof Error ? error.message : "Could not start transfer.";
+      dispatchTransferUi({ type: "error", message });
+      setAnnouncement(getFailureCopy(message, role).message);
+      setLog(message);
+    });
   };
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>): void => {
     const file = event.currentTarget.files?.[0];
-    if (file === undefined || transferRef.current === undefined) {
-      return;
+    if (file !== undefined) {
+      startFileTransfer(file);
     }
-    setSkippedCount(undefined);
-    setTransferResult(undefined);
-    void transferRef.current.startSend(file).catch((error: unknown) => {
-      setLog(
-        error instanceof Error ? error.message : "Could not start transfer.",
-      );
-    });
   };
 
   const handleFolderChange = (event: ChangeEvent<HTMLInputElement>): void => {
@@ -286,15 +467,38 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     try {
       void stageFolder(mapInputFiles(files));
     } catch (error: unknown) {
-      setLog(
-        error instanceof Error ? error.message : "Could not stage the folder.",
-      );
+      const message =
+        error instanceof Error ? error.message : "Could not stage the folder.";
+      dispatchTransferUi({ type: "error", message });
+      setAnnouncement(getFailureCopy(message, role).message);
+      setLog(message);
     }
+  };
+
+  const handleDragEnter = (event: DragEvent<HTMLElement>): void => {
+    if (role !== "uploader") {
+      return;
+    }
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setIsDragging(true);
   };
 
   const handleDragOver = (event: DragEvent<HTMLElement>): void => {
     if (role === "uploader") {
       event.preventDefault();
+      setIsDragging(true);
+    }
+  };
+
+  const handleDragLeave = (event: DragEvent<HTMLElement>): void => {
+    if (role !== "uploader") {
+      return;
+    }
+    event.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDragging(false);
     }
   };
 
@@ -303,6 +507,8 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       return;
     }
     event.preventDefault();
+    dragDepthRef.current = 0;
+    setIsDragging(false);
     const droppedEntries = Array.from(event.dataTransfer.items)
       .map((item) =>
         (
@@ -321,24 +527,85 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       void collectDroppedFolder(directory)
         .then(stageFolder)
         .catch((error: unknown) => {
-          setLog(
+          const message =
             error instanceof Error
               ? error.message
-              : "Could not stage the folder.",
-          );
+              : "Could not stage the folder.";
+          dispatchTransferUi({ type: "error", message });
+          setAnnouncement(getFailureCopy(message, role).message);
+          setLog(message);
         });
       return;
     }
 
     const file = event.dataTransfer.files[0];
     if (file !== undefined) {
-      setSkippedCount(undefined);
-      setTransferResult(undefined);
-      void transferRef.current?.startSend(file).catch((error: unknown) => {
-        setLog(
-          error instanceof Error ? error.message : "Could not start transfer.",
-        );
+      startFileTransfer(file);
+    }
+  };
+
+  const shortShareUrl =
+    roomSlug === undefined ? undefined : `mayo.pizza/${roomSlug}`;
+  const technicalShareUrl =
+    roomSlug === undefined ? undefined : getTechnicalShareUrl(roomSlug);
+
+  useEffect(() => {
+    let active = true;
+    if (
+      role !== "uploader" ||
+      stagedSelection === undefined ||
+      technicalShareUrl === undefined
+    ) {
+      setQrSvg(undefined);
+      setQrLoading(false);
+      return () => {
+        active = false;
+      };
+    }
+
+    setQrLoading(true);
+    void import("qrcode")
+      .then(async ({ toString: makeQrSvg }) => {
+        const styles = getComputedStyle(document.documentElement);
+        const dark = styles.getPropertyValue("--mp-olive").trim();
+        const light = styles.getPropertyValue("--mp-cream").trim();
+        const svg = await makeQrSvg(technicalShareUrl, {
+          type: "svg",
+          margin: 1,
+          color: { dark, light },
+        });
+        if (active) {
+          setQrSvg(addQrAccessibility(svg, technicalShareUrl));
+          setQrLoading(false);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setQrSvg(undefined);
+          setQrLoading(false);
+        }
       });
+
+    return () => {
+      active = false;
+    };
+  }, [role, stagedSelection, technicalShareUrl]);
+
+  const copyShareUrl = async (): Promise<void> => {
+    if (technicalShareUrl === undefined || shortShareUrl === undefined) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(technicalShareUrl);
+      setCopied(true);
+      setCopyFailed(false);
+      setAnnouncement("Link copied! Your slice is ready to share.");
+    } catch {
+      setCopied(false);
+      setCopyFailed(true);
+      setAnnouncement(
+        "The link stayed put! Copy it from the room card and share it when you’re ready.",
+      );
     }
   };
 
@@ -346,149 +613,492 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     transferProgress === undefined
       ? "—"
       : `${transferProgress.bytesDone}/${transferProgress.totalBytes} bytes · ${Math.round(transferProgress.bytesPerSec)} B/s`;
+  const progressPercent =
+    transferProgress === undefined || transferProgress.totalBytes <= 0
+      ? 0
+      : Math.min(
+          100,
+          Math.max(
+            0,
+            (transferProgress.bytesDone / transferProgress.totalBytes) * 100,
+          ),
+        );
+  const remainingBytes =
+    transferProgress === undefined
+      ? 0
+      : Math.max(0, transferProgress.totalBytes - transferProgress.bytesDone);
+  const isVerifying =
+    transferUi.phase === "transferring" &&
+    transferProgress !== undefined &&
+    transferProgress.bytesDone >= transferProgress.totalBytes;
+  const failureReason = transferUi.errorMessage ?? "The transfer failed.";
+  const failureCopy = getFailureCopy(failureReason, role);
+  const sessionCopy =
+    sessionNotice ?? getSessionCopy(sessionStatus, role, sessionFailureReason);
+  const humanCopy =
+    pendingManifest !== undefined
+      ? "A fresh slice just landed. Check the details, then grab it when you’re ready."
+      : transferUi.phase === "staged"
+        ? `Nice slice! ${stagedSelection?.name ?? "Your file"} is staged and ready to travel.`
+        : transferUi.phase === "complete"
+          ? "Slice landed! It’s verified and ready to enjoy."
+          : transferUi.phase === "failed"
+            ? failureCopy.message
+            : transferUi.phase === "cancelled"
+              ? getFailureCopy("cancelled", role).message
+              : isVerifying
+                ? "The slice made it. We’re checking every crumb now."
+                : transferUi.phase === "transferring"
+                  ? "Your slice is on the move. Keep this tab open while it travels."
+                  : sessionCopy;
+  const viewKey =
+    pendingManifest !== undefined ? "manifest" : `${role}-${transferUi.phase}`;
+
+  useEffect(() => {
+    if (viewKey !== "") {
+      headingRef.current?.focus();
+    }
+  }, [viewKey]);
+
+  const passwordRoomIsActive = password !== undefined && password.trim() !== "";
 
   return (
     <main
-      className="flex min-h-screen items-center justify-center p-6"
+      className="app-shell"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
-      <section className="w-full max-w-xl rounded-3xl border border-[var(--mp-olive)]/20 bg-white/50 p-8 shadow-sm">
-        <p className="text-sm uppercase tracking-[0.3em] opacity-60">
-          mayo.pizza
-        </p>
-        <h1
-          className="mt-3 text-4xl"
-          style={{ fontFamily: "var(--mp-font-display)" }}
+      <section
+        className={`drop-zone${isDragging ? " drop-zone--dragging" : ""}`}
+        aria-label={
+          role === "uploader"
+            ? "Drop zone for sending a file"
+            : "mayo.pizza receiver room"
+        }
+      >
+        <div
+          className={`room-card${role === "downloader" ? " room-card--compact" : ""}`}
         >
-          {role === "uploader" ? "Send a slice" : "Receive a slice"}
-        </h1>
-        {roomSlug !== undefined && (
-          <p className="mt-4 text-lg">
-            Room: <span data-testid="slug">{roomSlug}</span>
+          <header className="brand-hero">
+            <img
+              className="brand-mark"
+              src="/brand/logo-mark.svg"
+              alt="mayo.pizza pizza portrait"
+            />
+            <h1 className="wordmark">mayo.pizza</h1>
+            <p className="tagline">Secure. Fast. Shared.</p>
+          </header>
+
+          <div className="mt-8 grid gap-4">
+            <h2 ref={headingRef} className="view-heading" tabIndex={-1}>
+              {role === "uploader" ? "Send a slice" : "Receive a slice"}
+            </h2>
+            <p className="voice-copy">{humanCopy}</p>
+            {isDragging && role === "uploader" && (
+              <p className="status-banner" role="status">
+                <span className="status-banner__label">Drop zone ready</span>
+                <span>Drop it like it’s hot! Let go to stage your slice.</span>
+              </p>
+            )}
+          </div>
+
+          {roomSlug !== undefined && (
+            <p className="mt-6 muted">
+              Room:{" "}
+              <span className="mono" data-testid="slug">
+                {roomSlug}
+              </span>
+            </p>
+          )}
+
+          {role === "uploader" && (
+            <div className="mt-6 grid gap-4">
+              {stagedSelection === undefined && (
+                <div className="file-picker-row">
+                  <label
+                    className="picker-label"
+                    data-testid="file-picker-label"
+                    htmlFor="file-input"
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        fileInputRef.current?.click();
+                      }
+                    }}
+                    // biome-ignore lint/a11y/noNoninteractiveTabindex: the label is the visible keyboard file-picker affordance
+                    tabIndex={0}
+                  >
+                    Choose a slice
+                    <input
+                      ref={fileInputRef}
+                      className="visually-hidden-input"
+                      data-testid="file-input"
+                      id="file-input"
+                      onChange={handleFileChange}
+                      // The label is the keyboard affordance; the input stays operable via label clicks and setInputFiles.
+                      tabIndex={-1}
+                      type="file"
+                    />
+                  </label>
+                  <label
+                    className="picker-label"
+                    htmlFor="folder-input"
+                    // biome-ignore lint/a11y/noNoninteractiveTabindex: the label is the visible keyboard folder-picker affordance
+                    tabIndex={0}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        document.getElementById("folder-input")?.click();
+                      }
+                    }}
+                  >
+                    Choose folder
+                    <input
+                      {...{ webkitdirectory: "" }}
+                      className="visually-hidden-input"
+                      data-testid="folder-input"
+                      id="folder-input"
+                      multiple
+                      onChange={handleFolderChange}
+                      // The label is the keyboard affordance; the input stays operable via label clicks and setInputFiles.
+                      tabIndex={-1}
+                      type="file"
+                    />
+                  </label>
+                </div>
+              )}
+
+              {skippedCount !== undefined && (
+                <p className="muted" data-testid="skipped-count">
+                  Skipped {skippedCount} system files
+                </p>
+              )}
+
+              {stagedSelection !== undefined && (
+                <div className="staged-card">
+                  <div className="staged-card__header">
+                    <div>
+                      <p className="file-name">{stagedSelection.name}</p>
+                      <p className="mono muted">
+                        {formatBytes(stagedSelection.size)}
+                        {stagedSelection.fileCount === undefined
+                          ? ""
+                          : ` · ${stagedSelection.fileCount} files`}
+                      </p>
+                    </div>
+                    <span className="mono muted">
+                      {transferUi.phase === "complete" ? "landed" : "staged"}
+                    </span>
+                  </div>
+
+                  {shortShareUrl !== undefined &&
+                    technicalShareUrl !== undefined && (
+                      <div className="room-link">
+                        <span className="muted">Share this room</span>
+                        <div className="button-row">
+                          <span className="room-link__value">
+                            {shortShareUrl}
+                          </span>
+                          <button
+                            className="button button--secondary"
+                            onClick={() => void copyShareUrl()}
+                            type="button"
+                            aria-label="Copy room link"
+                          >
+                            {copied ? "Copied!" : "Copy link"}
+                          </button>
+                        </div>
+                        {copyFailed && (
+                          <span className="muted">
+                            The link stayed put. Select it and copy it when
+                            you’re ready.
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                  <div className="staged-card__body">
+                    <div>
+                      <p className="muted">
+                        {passwordRoomIsActive
+                          ? "This room has a password tucked inside its link."
+                          : "Your slice is ready to travel peer to peer."}
+                      </p>
+                      <details className="password-panel">
+                        <summary>
+                          {passwordRoomIsActive
+                            ? "Password room is on"
+                            : "Lock this room (optional)"}
+                        </summary>
+                        <label className="password-field">
+                          <span>Room password</span>
+                          <input
+                            aria-describedby="password-note"
+                            disabled={passwordRoomIsActive}
+                            onChange={(event) =>
+                              setPasswordDraft(event.target.value)
+                            }
+                            placeholder={
+                              passwordRoomIsActive
+                                ? "Password set before room creation"
+                                : "Set before opening a room"
+                            }
+                            type="password"
+                            value={passwordDraft}
+                          />
+                        </label>
+                        <p className="password-note" id="password-note">
+                          {passwordRoomIsActive
+                            ? "This room was opened with a password before anyone joined."
+                            : "Room creation starts as soon as you land here. To use a password, open this page with a password query before sharing the room."}
+                        </p>
+                      </details>
+                    </div>
+                    <div className="qr-wrap">
+                      {qrSvg !== undefined ? (
+                        // The SVG is generated locally by qrcode from a validated room URL.
+                        // biome-ignore lint/security/noDangerouslySetInnerHtml: local QR SVG is generated without remote input
+                        <div dangerouslySetInnerHTML={{ __html: qrSvg }} />
+                      ) : (
+                        <span className="muted" role="status">
+                          {qrLoading
+                            ? "Making a share square…"
+                            : "Share square unavailable"}
+                        </span>
+                      )}
+                      <span className="muted">Scan to join</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {transferProgress !== undefined && (
+                <section
+                  className="transfer-panel"
+                  aria-label="Transfer progress"
+                >
+                  <div className="progress-track" aria-hidden="true">
+                    <div
+                      className="progress-fill"
+                      style={{ width: `${progressPercent}%` }}
+                    />
+                  </div>
+                  <div className="progress-stats">
+                    <span className="mono">{progressText}</span>
+                    <span className="mono">
+                      {formatTransferRate(transferProgress.bytesPerSec)} · ETA{" "}
+                      {formatEta(remainingBytes, transferProgress.bytesPerSec)}
+                    </span>
+                  </div>
+                </section>
+              )}
+
+              <button
+                className="button button--ghost"
+                data-testid="ping"
+                disabled={connectionState !== "connected"}
+                onClick={sendPing}
+                tabIndex={-1}
+                type="button"
+              >
+                Send ping
+              </button>
+            </div>
+          )}
+
+          {role === "downloader" && pendingManifest !== undefined && (
+            <div className="mt-6 grid gap-4">
+              <article className="manifest-card" data-testid="manifest-preview">
+                <div className="manifest-card__header">
+                  <div>
+                    <p className="file-name">{pendingManifest.suggestedName}</p>
+                    <p className="mono muted">
+                      {formatBytes(pendingManifest.totalBytes)}
+                    </p>
+                  </div>
+                  <span className="mono muted">
+                    {pendingManifest.mode === "zip"
+                      ? "folder slice"
+                      : "file slice"}
+                  </span>
+                </div>
+                {pendingManifest.mode === "zip" && (
+                  <p className="mono muted">
+                    <span data-testid="manifest-file-count">
+                      {pendingManifest.items.length}
+                    </span>{" "}
+                    files · {pendingManifest.totalBytes} bytes
+                  </p>
+                )}
+                <div className="button-row">
+                  <button
+                    className="button button--primary"
+                    data-testid="accept-transfer"
+                    onClick={acceptTransfer}
+                    type="button"
+                  >
+                    Grab your slice
+                  </button>
+                  <button
+                    className="button button--ghost"
+                    data-testid="reject-transfer"
+                    onClick={rejectTransfer}
+                    type="button"
+                  >
+                    Put it back
+                  </button>
+                </div>
+              </article>
+            </div>
+          )}
+
+          {role === "downloader" && transferProgress !== undefined && (
+            <section
+              className="mt-6 transfer-panel"
+              aria-label="Transfer progress"
+            >
+              <div className="progress-track" aria-hidden="true">
+                <div
+                  className="progress-fill"
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+              <div className="progress-stats">
+                <span className="mono">{progressText}</span>
+                <span className="mono">
+                  {formatTransferRate(transferProgress.bytesPerSec)} · ETA{" "}
+                  {formatEta(remainingBytes, transferProgress.bytesPerSec)}
+                </span>
+              </div>
+            </section>
+          )}
+
+          {transferUi.phase === "failed" && (
+            <div className="failure-card mt-6" role="alert">
+              <h3>{failureCopy.heading}</h3>
+              <p className="voice-copy">{failureCopy.message}</p>
+              <details className="error-detail">
+                <summary>Show the technical crumb trail</summary>
+                <code>{failureReason}</code>
+              </details>
+            </div>
+          )}
+
+          <div className="result-line mt-6" data-testid="transfer-result">
+            {transferUi.phase === "complete" && transferResult?.verified ? (
+              `Transfer result: verified=true sha256=${transferResult.sha256}`
+            ) : transferUi.phase === "failed" &&
+              transferResult !== undefined ? (
+              <>
+                Transfer result: failed — {failureCopy.message}{" "}
+                <details className="error-detail">
+                  <summary>Technical details</summary>
+                  <code>
+                    verified=false sha256={transferResult.sha256}
+                    {transferResult.expectedSha256 === undefined
+                      ? ""
+                      : ` expectedSha256=${transferResult.expectedSha256}`}
+                  </code>
+                </details>
+              </>
+            ) : transferUi.phase === "failed" ? (
+              <>
+                Transfer result: failed — {failureCopy.message}{" "}
+                <details className="error-detail">
+                  <summary>Technical details</summary>
+                  <code>{failureReason}</code>
+                </details>
+              </>
+            ) : transferUi.phase === "cancelled" ? (
+              "Transfer result: cancelled"
+            ) : (
+              "Transfer result: pending"
+            )}
+          </div>
+
+          <p className="status-banner mt-6" role="status">
+            <span className="status-banner__label">Room status</span>
+            <span>{humanCopy}</span>
           </p>
-        )}
-        <dl className="mt-8 grid gap-3 text-sm">
-          <div className="flex justify-between gap-4 border-b border-[var(--mp-olive)]/10 pb-2">
-            <dt>Connection</dt>
-            <dd data-testid="connection-state">{connectionState}</dd>
-          </div>
-          <div className="flex justify-between gap-4 border-b border-[var(--mp-olive)]/10 pb-2">
-            <dt>Session</dt>
-            <dd data-testid="session-status">{sessionStatus}</dd>
-          </div>
-          <div className="flex justify-between gap-4 border-b border-[var(--mp-olive)]/10 pb-2">
-            <dt>ICE</dt>
-            <dd>{iceConnectionState}</dd>
-          </div>
-          <div className="flex justify-between gap-4 border-b border-[var(--mp-olive)]/10 pb-2">
-            <dt>Last pong</dt>
-            <dd data-testid="last-pong">{lastPong}</dd>
-          </div>
-          <div className="flex justify-between gap-4 border-b border-[var(--mp-olive)]/10 pb-2">
-            <dt>Transfer</dt>
-            <dd data-testid="progress">{progressText}</dd>
-          </div>
-          <div className="flex justify-between gap-4 border-b border-[var(--mp-olive)]/10 pb-2">
-            <dt>Buffered</dt>
-            <dd data-testid="buffered-amount">{bufferedAmount}</dd>
-          </div>
-          <div className="flex justify-between gap-4 border-b border-[var(--mp-olive)]/10 pb-2">
-            <dt>Sink</dt>
-            <dd data-testid="sink-strategy">{getSinkStrategy()}</dd>
-          </div>
-        </dl>
-        {role === "downloader" && pendingManifest !== undefined && (
-          <div className="mt-8 flex flex-wrap items-center gap-3">
-            {pendingManifest.mode === "zip" && (
-              <p className="w-full text-sm" data-testid="manifest-preview">
-                <span data-testid="manifest-file-count">
-                  {pendingManifest.items.length}
-                </span>{" "}
-                files · {pendingManifest.totalBytes} bytes
+
+          <details className="mt-4">
+            <summary className="muted">Under the hood</summary>
+            <div className="technical-grid mt-3">
+              <dl className="technical-grid__row">
+                <dt>Connection</dt>
+                <dd data-testid="connection-state">{connectionState}</dd>
+              </dl>
+              <dl className="technical-grid__row">
+                <dt>Session</dt>
+                <dd data-testid="session-status">{sessionStatus}</dd>
+              </dl>
+              <dl className="technical-grid__row">
+                <dt>ICE</dt>
+                <dd>{iceConnectionState}</dd>
+              </dl>
+              <dl className="technical-grid__row">
+                <dt>Last pong</dt>
+                <dd data-testid="last-pong">{lastPong}</dd>
+              </dl>
+              <dl className="technical-grid__row">
+                <dt>Transfer</dt>
+                <dd data-testid="progress">{progressText}</dd>
+              </dl>
+              <dl className="technical-grid__row">
+                <dt>Buffered</dt>
+                <dd data-testid="buffered-amount">{bufferedAmount}</dd>
+              </dl>
+              <dl className="technical-grid__row">
+                <dt>Sink</dt>
+                <dd data-testid="sink-strategy">{getSinkStrategy()}</dd>
+              </dl>
+              <p className="muted text-xs">
+                Peak buffered:{" "}
+                <span className="mono">{maxBufferedAmount} bytes</span>
               </p>
-            )}
-            <button
-              className="rounded-full bg-[var(--mp-olive)] px-5 py-3 text-[var(--mp-cream)]"
-              data-testid="accept-transfer"
-              onClick={acceptTransfer}
-              type="button"
-            >
-              Save {pendingManifest.suggestedName}
-            </button>
-            <button
-              className="rounded-full border border-[var(--mp-olive)] px-5 py-3"
-              data-testid="reject-transfer"
-              onClick={rejectTransfer}
-              type="button"
-            >
-              Reject
-            </button>
-          </div>
-        )}
-        {role === "uploader" && (
-          <div className="mt-8 flex flex-wrap gap-3">
-            <button
-              className="rounded-full bg-[var(--mp-olive)] px-5 py-3 text-[var(--mp-cream)] disabled:cursor-not-allowed disabled:opacity-40"
-              data-testid="ping"
-              disabled={connectionState !== "connected"}
-              onClick={sendPing}
-              type="button"
-            >
-              Send ping
-            </button>
-            <label className="cursor-pointer rounded-full border border-[var(--mp-olive)] px-5 py-3">
-              Choose file
-              <input
-                className="sr-only"
-                data-testid="file-input"
-                onChange={handleFileChange}
-                type="file"
-              />
-            </label>
-            <label className="cursor-pointer rounded-full border border-[var(--mp-olive)] px-5 py-3">
-              Choose folder
-              <input
-                {...{ webkitdirectory: "" }}
-                className="sr-only"
-                data-testid="folder-input"
-                multiple
-                onChange={handleFolderChange}
-                type="file"
-              />
-            </label>
-            {skippedCount !== undefined && (
-              <p data-testid="skipped-count">
-                Skipped {skippedCount} system files
+              <p data-testid="log" className="muted text-xs">
+                {log}
               </p>
-            )}
-          </div>
-        )}
-        <p data-testid="transfer-result" className="mt-4 break-all text-sm">
-          {transferResult === undefined
-            ? "Transfer result: pending"
-            : `Transfer result: verified=${transferResult.verified} sha256=${transferResult.sha256}`}
-        </p>
-        <p className="mt-2 text-xs opacity-60">
-          Peak buffered: {maxBufferedAmount} bytes
-        </p>
-        <p data-testid="log" className="mt-6 text-sm opacity-70">
-          {log}
-        </p>
+            </div>
+          </details>
+
+          <footer className="privacy-note">
+            Your files never touch our servers. Sometimes they take the scenic
+            route (encrypted) — but even then, we can’t read a byte.
+          </footer>
+        </div>
       </section>
+      <p aria-live="polite" className="sr-only" role="status">
+        {announcement}
+      </p>
     </main>
   );
 };
 
 const getRoute = (): RoomViewProps => {
   const path = window.location.pathname.replace(/^\/+|\/+$/g, "");
+  const password =
+    new URLSearchParams(window.location.search).get("password") ?? undefined;
   if (path === "") {
-    return { role: "uploader" };
+    return {
+      role: "uploader",
+      ...(password === undefined ? {} : { password }),
+    };
   }
   try {
-    return { role: "downloader", slug: decodeURIComponent(path) };
+    return {
+      role: "downloader",
+      slug: decodeURIComponent(path),
+      ...(password === undefined ? {} : { password }),
+    };
   } catch {
-    return { role: "downloader", slug: path };
+    return {
+      role: "downloader",
+      slug: path,
+      ...(password === undefined ? {} : { password }),
+    };
   }
 };
 

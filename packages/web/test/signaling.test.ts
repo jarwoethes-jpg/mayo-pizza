@@ -28,6 +28,7 @@ class FakeWebSocket {
 describe("signaling reconnect schedule", () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
     FakeWebSocket.instances = [];
   });
 
@@ -60,6 +61,44 @@ describe("signaling reconnect schedule", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(FakeWebSocket.instances).toHaveLength(2);
+    client.close();
+  });
+
+  it("binds the default timer before scheduling a reconnect", async () => {
+    const nativeSetTimeout = globalThis.setTimeout;
+    let scheduledCallback:
+      | Parameters<typeof globalThis.setTimeout>[0]
+      | undefined;
+    const defaultTimer = vi.fn(function (
+      this: unknown,
+      callback: Parameters<typeof globalThis.setTimeout>[0],
+      delay?: number,
+    ): ReturnType<typeof globalThis.setTimeout> {
+      expect(this).toBe(globalThis);
+      scheduledCallback = callback;
+      return nativeSetTimeout.call(globalThis, () => undefined, delay);
+    });
+    vi.stubGlobal("setTimeout", defaultTimer);
+
+    const client = new SignalingClient({
+      url: "ws://example.test/ws",
+      random: () => 0.5,
+      webSocketFactory: () => new FakeWebSocket() as unknown as WebSocket,
+    });
+    const connection = client.connect();
+    const first = FakeWebSocket.instances[0];
+    if (first === undefined) {
+      throw new Error("The first fake socket was not created.");
+    }
+    first.readyState = 1;
+    first.onopen?.();
+    await connection;
+
+    expect(() =>
+      first.onclose?.({ code: 1006, reason: "drop", wasClean: false }),
+    ).not.toThrow();
+    expect(defaultTimer).toHaveBeenCalledWith(expect.any(Function), 1_000);
+    expect(scheduledCallback).toBeDefined();
     client.close();
   });
 
