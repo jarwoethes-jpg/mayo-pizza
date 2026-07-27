@@ -19,6 +19,7 @@ import {
 import {
   createRoomRegistry,
   parseRoomTtlEnv,
+  ROOM_AUTH_FAILURE_LIMIT,
   ROOM_TTL_MS,
   type Room,
   type RoomRegistry,
@@ -79,15 +80,16 @@ const sendMessage = (socket: WebSocket, message: SignalingMessage): void => {
 
 const sendError = (
   socket: WebSocket,
-  code:
-    | "BAD_SLUG"
-    | "BAD_PASSWORD"
-    | "RATE_LIMITED"
-    | "ROOM_FULL"
-    | "MALFORMED",
+  code: Extract<SignalingMessage, { t: "error" }>["code"],
   message: string,
+  attemptsRemaining?: number,
 ): void => {
-  sendMessage(socket, { t: "error", code, message });
+  sendMessage(socket, {
+    t: "error",
+    code,
+    message,
+    ...(attemptsRemaining === undefined ? {} : { attemptsRemaining }),
+  });
 };
 
 type LogFields = {
@@ -185,7 +187,7 @@ const logAuthFailure = (
     emitLog("room_locked", {
       peerId: session.id,
       ip: session.ip,
-      code: "BAD_PASSWORD",
+      code: "ROOM_LOCKED",
       roomCount: rooms.rooms.size,
     });
   }
@@ -367,13 +369,13 @@ const handleMessage = async (
       emitLog("room_locked_rejected", {
         peerId: session.id,
         ip: session.ip,
-        code: "BAD_PASSWORD",
+        code: "ROOM_LOCKED",
         roomCount: rooms.rooms.size,
       });
       sendError(
         session.socket,
-        "BAD_PASSWORD",
-        "That password does not match.",
+        "ROOM_LOCKED",
+        "That room is locked after too many failed password attempts.",
       );
       return;
     } else if (room.peers.size >= MAX_ROOM_PEERS) {
@@ -381,10 +383,16 @@ const handleMessage = async (
       return;
     }
     if (!isUploaderRejoin && room.passwordHash !== undefined) {
-      const valid = await argon2.verify(
-        room.passwordHash,
-        message.password ?? "",
-      );
+      if (message.password === undefined || message.password.trim() === "") {
+        // WHY: probing whether a room is protected must be free, or page loads alone would lock the room.
+        sendError(
+          session.socket,
+          "PASSWORD_REQUIRED",
+          "That room requires a password.",
+        );
+        return;
+      }
+      const valid = await argon2.verify(room.passwordHash, message.password);
       if (!valid) {
         metrics.passwordFailures += 1;
         const locked = rooms.recordPasswordFailure(room);
@@ -400,6 +408,7 @@ const handleMessage = async (
           session.socket,
           "BAD_PASSWORD",
           "That password does not match.",
+          Math.max(0, ROOM_AUTH_FAILURE_LIMIT - room.passwordFailures),
         );
         return;
       }

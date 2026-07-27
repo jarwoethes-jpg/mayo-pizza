@@ -279,6 +279,98 @@ describe("localhost signaling server", () => {
     }
   });
 
+  it("does not count a missing password as a failed attempt", async () => {
+    const url = `ws://127.0.0.1:${port}/ws`;
+    const uploader = await openSocket(url);
+    const downloader = await openSocket(url);
+
+    try {
+      const createdPromise = nextMessage(uploader);
+      uploader.send(JSON.stringify({ t: "create", password: "secret" }));
+      const created = await createdPromise;
+      const slug = stringField(created, "slug");
+
+      const requiredPromise = nextMessage(downloader);
+      downloader.send(JSON.stringify({ t: "join", slug }));
+      expect(await requiredPromise).toEqual({
+        t: "error",
+        code: "PASSWORD_REQUIRED",
+        message: expect.any(String),
+      });
+
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const errorPromise = nextMessage(downloader);
+        downloader.send(JSON.stringify({ t: "join", slug, password: "wrong" }));
+        expect(await errorPromise).toMatchObject({
+          t: "error",
+          code: "BAD_PASSWORD",
+          attemptsRemaining: 4 - attempt,
+        });
+      }
+
+      const joinedPromise = nextMessage(downloader);
+      const peerJoinedPromise = nextMessage(uploader);
+      downloader.send(JSON.stringify({ t: "join", slug, password: "secret" }));
+      expect(await joinedPromise).toMatchObject({
+        t: "joined",
+        role: "downloader",
+      });
+      await peerJoinedPromise;
+    } finally {
+      uploader.close();
+      downloader.close();
+    }
+  });
+
+  it("does not lock a room after five empty-password probes", async () => {
+    const url = `ws://127.0.0.1:${port}/ws`;
+    const uploader = await openSocket(url);
+    const downloader = await openSocket(url);
+    const verify = vi.spyOn(argon2, "verify");
+
+    try {
+      const createdPromise = nextMessage(uploader);
+      uploader.send(JSON.stringify({ t: "create", password: "secret" }));
+      const created = await createdPromise;
+      const slug = stringField(created, "slug");
+      const verifiesBeforeProbes = verify.mock.calls.length;
+
+      for (let probe = 0; probe < 5; probe += 1) {
+        const requiredPromise = nextMessage(downloader);
+        downloader.send(JSON.stringify({ t: "join", slug, password: "   " }));
+        expect(await requiredPromise).toEqual({
+          t: "error",
+          code: "PASSWORD_REQUIRED",
+          message: expect.any(String),
+        });
+      }
+      expect(verify.mock.calls.length).toBe(verifiesBeforeProbes);
+
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const errorPromise = nextMessage(downloader);
+        downloader.send(JSON.stringify({ t: "join", slug, password: "wrong" }));
+        expect(await errorPromise).toMatchObject({
+          t: "error",
+          code: "BAD_PASSWORD",
+          attemptsRemaining: 4 - attempt,
+        });
+      }
+
+      const joinedPromise = nextMessage(downloader);
+      const peerJoinedPromise = nextMessage(uploader);
+      downloader.send(JSON.stringify({ t: "join", slug, password: "secret" }));
+      expect(await joinedPromise).toMatchObject({
+        t: "joined",
+        role: "downloader",
+      });
+      await peerJoinedPromise;
+    } finally {
+      verify.mockRestore();
+      uploader.close();
+      downloader.close();
+    }
+  });
+
   it("keeps a room after the uploader drops and symmetrically announces token rejoin", async () => {
     const url = `ws://127.0.0.1:${port}/ws`;
     const uploader = await openSocket(url);
@@ -354,6 +446,7 @@ describe("localhost signaling server", () => {
         expect(await errorPromise).toMatchObject({
           t: "error",
           code: "BAD_PASSWORD",
+          attemptsRemaining: 4 - attempt,
         });
       }
 
@@ -384,6 +477,7 @@ describe("localhost signaling server", () => {
           expect(await errorPromise).toMatchObject({
             t: "error",
             code: "BAD_PASSWORD",
+            attemptsRemaining: 4 - attempt,
           });
         }
 
@@ -394,7 +488,7 @@ describe("localhost signaling server", () => {
         );
         expect(await lockedErrorPromise).toMatchObject({
           t: "error",
-          code: "BAD_PASSWORD",
+          code: "ROOM_LOCKED",
         });
         expect(verify.mock.calls.length).toBe(verifiesBeforeLockedJoin);
       } finally {

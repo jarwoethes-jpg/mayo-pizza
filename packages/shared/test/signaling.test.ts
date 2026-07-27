@@ -24,6 +24,17 @@ const validMessages = [
     t: "error",
     code: "BAD_PASSWORD",
     message: "That password does not match.",
+    attemptsRemaining: 4,
+  },
+  {
+    t: "error",
+    code: "PASSWORD_REQUIRED",
+    message: "That room requires a password.",
+  },
+  {
+    t: "error",
+    code: "ROOM_LOCKED",
+    message: "That room is locked.",
   },
 ] as const;
 
@@ -43,6 +54,30 @@ const invalidMessages = [
   { t: "stat", event: "connected", route: "direct", extra: true },
   { t: "ice-config", iceServers: "stun:mayo.pizza:3478" },
   { t: "error", code: "NOT_A_REAL_CODE", message: "nope" },
+  {
+    t: "error",
+    code: "BAD_PASSWORD",
+    message: "nope",
+    attemptsRemaining: -1,
+  },
+  {
+    t: "error",
+    code: "BAD_PASSWORD",
+    message: "nope",
+    attemptsRemaining: 1.5,
+  },
+  {
+    t: "error",
+    code: "PASSWORD_REQUIRED",
+    message: "nope",
+    unexpected: true,
+  },
+  {
+    t: "error",
+    code: "PASSWORD_REQUIRED",
+    message: "nope",
+    attemptsRemaining: 4,
+  },
 ] as const;
 
 describe("signalingMessageSchema", () => {

@@ -292,7 +292,7 @@ describe("observability endpoints", () => {
       });
       await waitForFrame(
         passwordDownloader,
-        (frame) => frame.t === "error" && frame.code === "BAD_PASSWORD",
+        (frame) => frame.t === "error" && frame.code === "ROOM_LOCKED",
       );
       const afterLockedRejection = await metrics();
       expect(afterLockedRejection).toContain(
@@ -312,6 +312,14 @@ describe("observability endpoints", () => {
       expect(
         events.filter((event) => event === "room_locked_rejected"),
       ).toHaveLength(1);
+      const roomLockedLog = logs
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find((line) => line.event === "room_locked");
+      expect(roomLockedLog?.code).toBe("ROOM_LOCKED");
+      const roomLockedRejectedLog = logs
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find((line) => line.event === "room_locked_rejected");
+      expect(roomLockedRejectedLog?.code).toBe("ROOM_LOCKED");
     } finally {
       await server.close();
     }

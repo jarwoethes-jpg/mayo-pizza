@@ -12,11 +12,34 @@ const iceServerSchema = z
 const signalingErrorCodeSchema = z.enum([
   "BAD_SLUG",
   "BAD_PASSWORD",
+  "PASSWORD_REQUIRED",
+  "ROOM_LOCKED",
   "RATE_LIMITED",
   "ROOM_FULL",
   "MALFORMED",
 ]);
+const nonPasswordErrorCodeSchema = signalingErrorCodeSchema.refine(
+  (code) => code !== "BAD_PASSWORD",
+);
 const requiredPayloadSchema = z.custom<unknown>((value) => value !== undefined);
+
+const signalingErrorSchema = z.union([
+  z
+    .object({
+      t: z.literal("error"),
+      code: z.literal("BAD_PASSWORD"),
+      message: z.string(),
+      attemptsRemaining: z.number().int().nonnegative().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      t: z.literal("error"),
+      code: nonPasswordErrorCodeSchema,
+      message: z.string(),
+    })
+    .strict(),
+]);
 
 export const signalingMessageSchema = z.union([
   z
@@ -96,13 +119,7 @@ export const signalingMessageSchema = z.union([
       iceServers: z.array(iceServerSchema),
     })
     .strict(),
-  z
-    .object({
-      t: z.literal("error"),
-      code: signalingErrorCodeSchema,
-      message: z.string(),
-    })
-    .strict(),
+  signalingErrorSchema,
 ]);
 
 export type SignalingMessage = z.infer<typeof signalingMessageSchema>;
