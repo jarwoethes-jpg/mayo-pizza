@@ -1,4 +1,7 @@
+import { predictLength } from "client-zip";
 import type { TransferMessage } from "shared";
+import type { FolderEntry } from "../folder/entries";
+import { makeZipPlan, ZIP_DIRECTORY_LAST_MODIFIED } from "../folder/zipPlan";
 import { createSink, type Sink, type SinkFactory, SinkManager } from "../sink";
 import type {
   ReceiverWorkerCommand,
@@ -306,6 +309,9 @@ export class TransferController {
   private senderPump: WatermarkFramePump | undefined;
   private transferId: string | undefined;
   private senderFile: File | undefined;
+  private senderFolderEntries: FolderEntry[] | undefined;
+  private senderDirectoryLastModified = ZIP_DIRECTORY_LAST_MODIFIED;
+  private senderTotalBytes = 0;
   private senderCursor = 0;
   private senderReadPending = false;
   private senderLastSlice = false;
@@ -402,6 +408,8 @@ export class TransferController {
     const transferId = makeTransferId();
     this.transferId = transferId;
     this.senderFile = file;
+    this.senderFolderEntries = undefined;
+    this.senderTotalBytes = file.size;
     this.senderCursor = 0;
     this.senderReadPending = false;
     this.senderLastSlice = false;
@@ -423,6 +431,70 @@ export class TransferController {
       ],
       totalBytes: file.size,
       suggestedName: file.name,
+    });
+  }
+
+  /** Starts a deterministic store-only ZIP transfer for a collected folder tree. */
+  public async startFolderSend(
+    entries: readonly FolderEntry[],
+    rootName: string,
+  ): Promise<void> {
+    if (this.role !== "uploader") {
+      throw new Error("Only the uploader can start a folder transfer.");
+    }
+    if (this.destroyed) {
+      throw new Error("The transfer controller is closed.");
+    }
+    if (entries.length === 0 || rootName === "") {
+      throw new Error("There is nothing to send in this folder.");
+    }
+
+    const zipPlan = makeZipPlan(entries, ZIP_DIRECTORY_LAST_MODIFIED);
+    const predictedLength = predictLength(zipPlan);
+    const totalBytes = Number(predictedLength);
+    if (!Number.isSafeInteger(totalBytes) || totalBytes <= 0) {
+      throw new Error("The folder ZIP is too large to transfer safely.");
+    }
+
+    this.teardownActiveTransfer();
+    await this.channelsReady;
+    if (this.destroyed) {
+      return;
+    }
+
+    const transferId = makeTransferId();
+    const folderEntries = Array.from(entries);
+    this.transferId = transferId;
+    this.senderFile = undefined;
+    this.senderFolderEntries = folderEntries;
+    this.senderDirectoryLastModified = ZIP_DIRECTORY_LAST_MODIFIED;
+    this.senderTotalBytes = totalBytes;
+    this.senderCursor = 0;
+    this.senderReadPending = false;
+    this.senderLastSlice = false;
+    this.senderSha256 = "";
+    this.senderDoneSent = false;
+    this.senderAckedBytes = 0;
+    this.senderWaitingForAck = false;
+    this.senderSliceDrained = false;
+    const items = folderEntries.flatMap((entry) =>
+      entry.file === undefined
+        ? []
+        : [
+            {
+              path: entry.path,
+              size: entry.file.size,
+              lastModified: entry.file.lastModified,
+            },
+          ],
+    );
+    this.sendCtrl({
+      t: "manifest",
+      transferId,
+      mode: "zip",
+      items,
+      totalBytes,
+      suggestedName: `${rootName}.zip`,
     });
   }
 
@@ -521,12 +593,25 @@ export class TransferController {
     if (this.role !== "downloader") {
       return;
     }
-    if (
-      message.mode !== "single" ||
-      message.items.length !== 1 ||
-      message.items[0]?.size !== message.totalBytes
-    ) {
-      this.fail("Only a single-file manifest is supported.");
+    const validSingleManifest =
+      message.mode === "single" &&
+      message.items.length === 1 &&
+      message.items[0]?.size === message.totalBytes;
+    const itemBytes = message.items.reduce(
+      (total, item) => total + item.size,
+      0,
+    );
+    const validZipManifest =
+      message.mode === "zip" &&
+      message.totalBytes > 0 &&
+      message.items.every((item) => item.size >= 0) &&
+      message.totalBytes >= itemBytes;
+    if (!validSingleManifest && !validZipManifest) {
+      this.fail(
+        message.mode === "zip"
+          ? "The ZIP manifest has inconsistent byte totals."
+          : "Only a single-file manifest is supported.",
+      );
       return;
     }
     this.teardownActiveTransfer();
@@ -565,14 +650,14 @@ export class TransferController {
     }
     if (
       this.transferId !== message.transferId ||
-      this.senderFile === undefined
+      (this.senderFile === undefined && this.senderFolderEntries === undefined)
     ) {
       // A stale request can arrive after the sender has completed or replaced
       // a transfer. It is harmless and must not tear down a healthy session.
       return;
     }
     if (
-      message.offset > this.senderFile.size ||
+      message.offset > this.senderTotalBytes ||
       (message.offset > 0 && this.senderResuming)
     ) {
       return;
@@ -619,12 +704,24 @@ export class TransferController {
     if (!hadWorker || message.offset === 0) {
       // Offset zero can also be a reconnect before the first durable byte;
       // reset the existing worker rather than continuing its old hash state.
-      worker.postMessage({
-        t: "start",
-        file: this.senderFile,
-        offset: 0,
-        totalBytes: this.senderFile.size,
-      });
+      if (this.senderFolderEntries !== undefined) {
+        worker.postMessage({
+          t: "start",
+          folder: {
+            entries: this.senderFolderEntries,
+            directoryLastModified: this.senderDirectoryLastModified,
+          },
+          offset: 0,
+          totalBytes: this.senderTotalBytes,
+        });
+      } else if (this.senderFile !== undefined) {
+        worker.postMessage({
+          t: "start",
+          file: this.senderFile,
+          offset: 0,
+          totalBytes: this.senderTotalBytes,
+        });
+      }
     }
     if (message.offset > 0) {
       // The worker re-seeds from its nearest 4 MiB hash snapshot and reads at
@@ -1122,6 +1219,9 @@ export class TransferController {
     }
     this.transferId = undefined;
     this.senderFile = undefined;
+    this.senderFolderEntries = undefined;
+    this.senderDirectoryLastModified = ZIP_DIRECTORY_LAST_MODIFIED;
+    this.senderTotalBytes = 0;
     this.senderCursor = 0;
     this.senderReadPending = false;
     this.senderLastSlice = false;

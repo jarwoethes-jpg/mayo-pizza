@@ -1,9 +1,24 @@
+import type { FolderEntry } from "../folder/entries";
+
+export interface SenderFolderPayload {
+  entries: FolderEntry[];
+  directoryLastModified: number;
+}
+
 export type SenderWorkerCommand =
   | {
       t: "start";
-      file: File;
       offset: number;
       totalBytes: number;
+      file: File;
+      folder?: never;
+    }
+  | {
+      t: "start";
+      offset: number;
+      totalBytes: number;
+      folder: SenderFolderPayload;
+      file?: never;
     }
   | {
       t: "read";

@@ -1,6 +1,8 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { predictLength } from "client-zip";
 import { describe, expect, it, vi } from "vitest";
+import { makeZipPlan } from "../src/folder/zipPlan";
 import type { DataChannelPumpTarget } from "../src/net/transfer";
 import {
   createTransferController,
@@ -493,6 +495,150 @@ describe("transfer cancellation", () => {
       t: "resume",
       offset: 4,
     });
+    controller.destroy();
+  });
+
+  it("accepts a consistent ZIP manifest", () => {
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    const onManifest = vi.fn();
+    const worker = {
+      onmessage: null,
+      onerror: null,
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    };
+    const peer = {
+      ctrl: { readyState: "open", send: vi.fn() },
+      data: {
+        readyState: "open",
+        bufferedAmount: 0,
+        send: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      },
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    const controller = createTransferController("downloader", peer as never, {
+      onManifest,
+      receiverWorkerFactory: () => worker,
+    });
+
+    ctrlHandlers.get("manifest")?.({
+      t: "manifest",
+      transferId: "zip-transfer",
+      mode: "zip",
+      items: [
+        { path: "root/a.txt", size: 3, lastModified: 1 },
+        { path: "root/empty/", size: 0, lastModified: 0 },
+      ],
+      totalBytes: 128,
+      suggestedName: "root.zip",
+    });
+
+    expect(onManifest).toHaveBeenCalledOnce();
+    expect(worker.postMessage).toHaveBeenCalledWith({
+      t: "init",
+      transferId: "zip-transfer",
+      offset: 0,
+      totalBytes: 128,
+    });
+    controller.destroy();
+  });
+
+  it("uses the shared ZIP prediction for the folder manifest total", async () => {
+    const sent: unknown[] = [];
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    const peer = {
+      ctrl: {
+        readyState: "open",
+        send: (message: unknown) => sent.push(message),
+      },
+      data: {
+        readyState: "open",
+        bufferedAmount: 0,
+        send: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      },
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    const controller = createTransferController("uploader", peer as never);
+    const entries = [
+      { path: "root/", file: undefined },
+      { path: "root/empty/", file: undefined },
+      { path: "root/file.txt", file: new File(["payload"], "file.txt") },
+    ];
+
+    await controller.startFolderSend(entries, "root");
+
+    const manifest = sent[0] as {
+      mode: string;
+      totalBytes: number;
+      items: Array<{ path: string; size: number }>;
+      suggestedName: string;
+    };
+    expect(manifest.mode).toBe("zip");
+    expect(manifest.suggestedName).toBe("root.zip");
+    expect(manifest.items).toEqual([
+      { path: "root/file.txt", size: 7, lastModified: expect.any(Number) },
+    ]);
+    expect(manifest.totalBytes).toBe(
+      Number(predictLength(makeZipPlan(entries))),
+    );
+    controller.destroy();
+  });
+
+  it.each([
+    { totalBytes: 0, items: [] },
+    { totalBytes: 4, items: [{ path: "a", size: 5, lastModified: 1 }] },
+    { totalBytes: 4, items: [{ path: "a", size: -1, lastModified: 1 }] },
+  ])("rejects an inconsistent ZIP manifest", ({ totalBytes, items }) => {
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    const onError = vi.fn();
+    const peer = {
+      ctrl: { readyState: "open", send: vi.fn() },
+      data: {
+        readyState: "open",
+        bufferedAmount: 0,
+        send: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      },
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    const controller = createTransferController("downloader", peer as never, {
+      onError,
+    });
+
+    ctrlHandlers.get("manifest")?.({
+      t: "manifest",
+      transferId: "bad-zip-transfer",
+      mode: "zip",
+      items,
+      totalBytes,
+      suggestedName: "root.zip",
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringMatching(/ZIP manifest/),
+      }),
+    );
     controller.destroy();
   });
 });

@@ -1,5 +1,9 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import {
+  createZipStreamSource,
+  type ZipStreamSource,
+} from "../folder/zipSource";
 import type { SenderWorkerCommand, SenderWorkerEvent } from "./messages";
 
 const READ_SLICE = 4 * 1024 * 1024;
@@ -12,6 +16,7 @@ interface SenderWorkerScope {
 const workerScope = self as unknown as SenderWorkerScope;
 
 let file: File | undefined;
+let zipSource: ZipStreamSource | undefined;
 let totalBytes = 0;
 let cursor = 0;
 let hasher = sha256.create();
@@ -44,11 +49,19 @@ const sendError = (message: string): void => {
   workerScope.postMessage({ t: "error", message });
 };
 
+const cancelZipSource = (): void => {
+  const source = zipSource;
+  zipSource = undefined;
+  if (source !== undefined) {
+    void source.cancel().catch(() => undefined);
+  }
+};
+
 const readNextSlice = async (
   requestedOffset: number,
   currentOperation: number,
 ): Promise<void> => {
-  if (busy || cancelled || file === undefined) {
+  if (busy || cancelled || (file === undefined && zipSource === undefined)) {
     return;
   }
   if (requestedOffset !== cursor) {
@@ -58,16 +71,38 @@ const readNextSlice = async (
 
   busy = true;
   try {
-    const end = Math.min(cursor + READ_SLICE, file.size);
-    const buffer = await file.slice(cursor, end).arrayBuffer();
+    let buffer: ArrayBuffer;
+    let done: boolean;
+    if (zipSource !== undefined) {
+      const slice = await zipSource.readSlice(READ_SLICE);
+      buffer = slice.buffer;
+      done = slice.done;
+      if (buffer.byteLength === 0 && !done) {
+        throw new Error("The ZIP stream ended before the predicted size.");
+      }
+    } else {
+      const sourceFile = file;
+      if (sourceFile === undefined) {
+        return;
+      }
+      const end = Math.min(cursor + READ_SLICE, sourceFile.size);
+      buffer = await sourceFile.slice(cursor, end).arrayBuffer();
+      done = end >= sourceFile.size;
+    }
     if (cancelled || currentOperation !== operationId) {
       return;
     }
 
     hasher.update(new Uint8Array(buffer));
-    cursor = end;
-    snapshots.push({ offset: cursor, state: hasher.clone() });
-    const done = cursor >= file.size;
+    cursor += buffer.byteLength;
+    if (zipSource === undefined) {
+      snapshots.push({ offset: cursor, state: hasher.clone() });
+    }
+    if (cursor > totalBytes || (done && cursor !== totalBytes)) {
+      throw new Error(
+        `The ZIP stream produced ${cursor} bytes; predicted ${totalBytes}.`,
+      );
+    }
     const event: SenderWorkerEvent = {
       t: "slice",
       buffer,
@@ -90,7 +125,8 @@ const readNextSlice = async (
 };
 
 const resumeFrom = async (offset: number): Promise<void> => {
-  if (file === undefined || offset < 0 || offset > file.size) {
+  const maximumOffset = zipSource === undefined ? file?.size : totalBytes;
+  if (maximumOffset === undefined || offset < 0 || offset > maximumOffset) {
     sendError("The sender resume offset is outside the selected file.");
     return;
   }
@@ -98,6 +134,40 @@ const resumeFrom = async (offset: number): Promise<void> => {
   cancelled = false;
   busy = true;
   try {
+    if (zipSource !== undefined) {
+      await zipSource.reset();
+      if (cancelled || currentOperation !== operationId) {
+        return;
+      }
+      hasher = sha256.create();
+      cursor = 0;
+      while (cursor < offset) {
+        const slice = await zipSource.readSlice(
+          Math.min(READ_SLICE, offset - cursor),
+        );
+        const buffer = new Uint8Array(slice.buffer);
+        if (buffer.byteLength === 0) {
+          throw new Error("The ZIP stream ended before the resume offset.");
+        }
+        hasher.update(buffer);
+        cursor += buffer.byteLength;
+        if (slice.done && cursor < offset) {
+          throw new Error("The ZIP stream ended before the resume offset.");
+        }
+        if (cancelled || currentOperation !== operationId) {
+          return;
+        }
+      }
+      // Rebuilding is O(offset) for v1 because a stream has no random-access
+      // hash snapshots; discarded buffers never cross the worker boundary.
+      workerScope.postMessage({ t: "resumed", offset });
+      return;
+    }
+
+    const sourceFile = file;
+    if (sourceFile === undefined) {
+      return;
+    }
     let seedOffset = 0;
     let seedState = sha256.create();
     for (const snapshot of snapshots) {
@@ -111,7 +181,7 @@ const resumeFrom = async (offset: number): Promise<void> => {
     cursor = seedOffset;
     while (cursor < offset) {
       const end = Math.min(cursor + READ_SLICE, offset);
-      const buffer = await file.slice(cursor, end).arrayBuffer();
+      const buffer = await sourceFile.slice(cursor, end).arrayBuffer();
       if (cancelled || currentOperation !== operationId) {
         return;
       }
@@ -137,6 +207,7 @@ workerScope.onmessage = (event) => {
   if (command.t === "cancel") {
     cancelled = true;
     operationId += 1;
+    cancelZipSource();
     file = undefined;
     return;
   }
@@ -145,12 +216,22 @@ workerScope.onmessage = (event) => {
       sendError("Only offset zero is supported for a new transfer.");
       return;
     }
+    cancelZipSource();
     file = command.file;
+    if (command.folder !== undefined) {
+      file = undefined;
+      zipSource = createZipStreamSource(
+        command.folder.entries,
+        command.folder.directoryLastModified,
+      );
+    }
     totalBytes = command.totalBytes;
     cursor = command.offset;
     hasher = sha256.create();
     snapshots.length = 0;
-    snapshots.push({ offset: 0, state: hasher.clone() });
+    if (zipSource === undefined) {
+      snapshots.push({ offset: 0, state: hasher.clone() });
+    }
     cancelled = false;
     busy = false;
     operationId += 1;

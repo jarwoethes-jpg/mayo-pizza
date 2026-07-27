@@ -1,5 +1,16 @@
-import { type ChangeEvent, useEffect, useRef, useState } from "react";
+import {
+  type ChangeEvent,
+  type DragEvent,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { createRoot } from "react-dom/client";
+import {
+  collectDroppedFolder,
+  type FolderCollection,
+  mapInputFiles,
+} from "./folder/entries";
 import { createPeer, type PeerConnection, type PeerRole } from "./net/peer";
 import { createSignalingClient } from "./net/signaling";
 import {
@@ -42,6 +53,9 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
   const [pendingManifest, setPendingManifest] = useState<
     TransferManifestInfo | undefined
   >(undefined);
+  const [skippedCount, setSkippedCount] = useState<number | undefined>(
+    undefined,
+  );
   const [bufferedAmount, setBufferedAmount] = useState(0);
   const [maxBufferedAmount, setMaxBufferedAmount] = useState(0);
   const peerRef = useRef<PeerConnection | undefined>(undefined);
@@ -232,11 +246,30 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     setPendingManifest(undefined);
   };
 
+  const stageFolder = async (collection: FolderCollection): Promise<void> => {
+    const transfer = transferRef.current;
+    if (transfer === undefined) {
+      return;
+    }
+    setTransferResult(undefined);
+    setSkippedCount(collection.skippedCount);
+    try {
+      await transfer.startFolderSend(collection.entries, collection.rootName);
+    } catch (error: unknown) {
+      setLog(
+        error instanceof Error
+          ? error.message
+          : "Could not start folder transfer.",
+      );
+    }
+  };
+
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>): void => {
     const file = event.currentTarget.files?.[0];
     if (file === undefined || transferRef.current === undefined) {
       return;
     }
+    setSkippedCount(undefined);
     setTransferResult(undefined);
     void transferRef.current.startSend(file).catch((error: unknown) => {
       setLog(
@@ -245,13 +278,81 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     });
   };
 
+  const handleFolderChange = (event: ChangeEvent<HTMLInputElement>): void => {
+    const files = event.currentTarget.files;
+    if (files === null) {
+      return;
+    }
+    try {
+      void stageFolder(mapInputFiles(files));
+    } catch (error: unknown) {
+      setLog(
+        error instanceof Error ? error.message : "Could not stage the folder.",
+      );
+    }
+  };
+
+  const handleDragOver = (event: DragEvent<HTMLElement>): void => {
+    if (role === "uploader") {
+      event.preventDefault();
+    }
+  };
+
+  const handleDrop = (event: DragEvent<HTMLElement>): void => {
+    if (role !== "uploader") {
+      return;
+    }
+    event.preventDefault();
+    const droppedEntries = Array.from(event.dataTransfer.items)
+      .map((item) =>
+        (
+          item as DataTransferItem & {
+            webkitGetAsEntry?: () => FileSystemEntry | null;
+          }
+        ).webkitGetAsEntry?.(),
+      )
+      .filter(
+        (entry): entry is FileSystemEntry =>
+          entry !== null && entry !== undefined,
+      );
+    const directory = droppedEntries.find((entry) => entry.isDirectory);
+    if (directory !== undefined) {
+      setSkippedCount(undefined);
+      void collectDroppedFolder(directory)
+        .then(stageFolder)
+        .catch((error: unknown) => {
+          setLog(
+            error instanceof Error
+              ? error.message
+              : "Could not stage the folder.",
+          );
+        });
+      return;
+    }
+
+    const file = event.dataTransfer.files[0];
+    if (file !== undefined) {
+      setSkippedCount(undefined);
+      setTransferResult(undefined);
+      void transferRef.current?.startSend(file).catch((error: unknown) => {
+        setLog(
+          error instanceof Error ? error.message : "Could not start transfer.",
+        );
+      });
+    }
+  };
+
   const progressText =
     transferProgress === undefined
       ? "—"
       : `${transferProgress.bytesDone}/${transferProgress.totalBytes} bytes · ${Math.round(transferProgress.bytesPerSec)} B/s`;
 
   return (
-    <main className="flex min-h-screen items-center justify-center p-6">
+    <main
+      className="flex min-h-screen items-center justify-center p-6"
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
       <section className="w-full max-w-xl rounded-3xl border border-[var(--mp-olive)]/20 bg-white/50 p-8 shadow-sm">
         <p className="text-sm uppercase tracking-[0.3em] opacity-60">
           mayo.pizza
@@ -299,6 +400,14 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
         </dl>
         {role === "downloader" && pendingManifest !== undefined && (
           <div className="mt-8 flex flex-wrap items-center gap-3">
+            {pendingManifest.mode === "zip" && (
+              <p className="w-full text-sm" data-testid="manifest-preview">
+                <span data-testid="manifest-file-count">
+                  {pendingManifest.items.length}
+                </span>{" "}
+                files · {pendingManifest.totalBytes} bytes
+              </p>
+            )}
             <button
               className="rounded-full bg-[var(--mp-olive)] px-5 py-3 text-[var(--mp-cream)]"
               data-testid="accept-transfer"
@@ -337,6 +446,22 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
                 type="file"
               />
             </label>
+            <label className="cursor-pointer rounded-full border border-[var(--mp-olive)] px-5 py-3">
+              Choose folder
+              <input
+                {...{ webkitdirectory: "" }}
+                className="sr-only"
+                data-testid="folder-input"
+                multiple
+                onChange={handleFolderChange}
+                type="file"
+              />
+            </label>
+            {skippedCount !== undefined && (
+              <p data-testid="skipped-count">
+                Skipped {skippedCount} system files
+              </p>
+            )}
           </div>
         )}
         <p data-testid="transfer-result" className="mt-4 break-all text-sm">
