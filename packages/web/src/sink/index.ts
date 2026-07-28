@@ -158,3 +158,4 @@ export {
   SW_CREDIT_BYTES,
   SwStreamSink,
 } from "./swStream";
+export { SINK_PROGRESS_WATCHDOG_MS } from "./watchdog";

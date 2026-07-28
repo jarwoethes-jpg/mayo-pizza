@@ -158,4 +158,38 @@ describe("signaling reconnect schedule", () => {
     await vi.waitFor(() => expect(resumed).toHaveBeenCalledOnce());
     client.close();
   });
+
+  it("does not reconnect after a fatal room error and reap close", async () => {
+    vi.useFakeTimers();
+    const client = new SignalingClient({
+      url: "ws://example.test/ws",
+      random: () => 0.5,
+      webSocketFactory: () => new FakeWebSocket() as unknown as WebSocket,
+    });
+    const connection = client.connect();
+    const first = FakeWebSocket.instances[0];
+    if (first === undefined) {
+      throw new Error("The first fake socket was not created.");
+    }
+    first.readyState = 1;
+    first.onopen?.();
+    await connection;
+
+    const joined = client.join("expired-room");
+    await Promise.resolve();
+    await Promise.resolve();
+    first.onmessage?.({
+      data: JSON.stringify({
+        t: "error",
+        code: "BAD_SLUG",
+        message: "That room has expired.",
+      }),
+    });
+    first.onclose?.({ code: 1001, reason: "Room expired", wasClean: false });
+
+    await expect(joined).rejects.toThrow("BAD_SLUG");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    client.close();
+  });
 });

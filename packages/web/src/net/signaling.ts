@@ -14,7 +14,20 @@ export type SignalingClientMessage =
   | Extract<SignalingMessage, { t: "join" }>
   | Extract<SignalingMessage, { t: "signal"; to: string }>
   | Extract<SignalingMessage, { t: "ice-config" }>
+  | Extract<SignalingMessage, { t: "stat" }>
   | Extract<SignalingMessage, { t: "close" }>;
+
+/** Error codes preserved when a signaling request is rejected. */
+export type SignalingErrorCode = Extract<
+  SignalingServerMessage,
+  { t: "error" }
+>["code"];
+
+/** A signaling error with the password-only attempt count attached. */
+export interface SignalingError extends Error {
+  code: SignalingErrorCode;
+  attemptsRemaining?: number;
+}
 
 export interface SignalingProtocolError {
   message: string;
@@ -128,6 +141,17 @@ const parseServerMessage = (
   }
   return parsed.data;
 };
+
+const makeSignalingError = (
+  message: Extract<SignalingServerMessage, { t: "error" }>,
+): SignalingError =>
+  Object.assign(new Error(`${message.code}: ${message.message}`), {
+    code: message.code,
+    ...(message.code === "BAD_PASSWORD" &&
+    message.attemptsRemaining !== undefined
+      ? { attemptsRemaining: message.attemptsRemaining }
+      : {}),
+  });
 
 interface PendingRequest {
   event: "created" | "joined" | "ice-config";
@@ -460,14 +484,16 @@ export class SignalingClient {
 
     this.emit(message.t, message);
     if (message.t === "error") {
-      this.rejectPending(new Error(`${message.code}: ${message.message}`));
-      if (this.resumeInFlight && message.code === "BAD_SLUG") {
+      this.rejectPending(makeSignalingError(message));
+      if (message.code === "BAD_SLUG") {
         this.manuallyClosed = true;
         if (this.reconnectTimer !== undefined) {
           this.clearTimer(this.reconnectTimer);
           this.reconnectTimer = undefined;
         }
-        this.socket?.close(1000, "Room expired");
+        if (this.resumeInFlight) {
+          this.socket?.close(1000, "Room expired");
+        }
       }
       return;
     }

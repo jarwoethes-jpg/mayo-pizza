@@ -15,7 +15,12 @@ export const getFailureCopy = (reason: string, role: PeerRole): FailureCopy => {
         "Slice missed its train! This link has expired or was typed a little differently. Ask for a fresh one and try again.",
     };
   }
-  if (normalized.includes("sink") || normalized.includes("save")) {
+  if (
+    normalized.includes("sink") ||
+    normalized.includes("save") ||
+    normalized.includes("file system access") ||
+    normalized.includes("service-worker downloads")
+  ) {
     return {
       heading: "The save spot got messy.",
       message:

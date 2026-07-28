@@ -279,8 +279,9 @@ const handleMessage = async (
       return;
     }
 
+    // WHY: mirror the join-side blank check; hashing a blank password would make the room unjoinable.
     const passwordHash =
-      message.password === undefined
+      message.password === undefined || message.password.trim() === ""
         ? undefined
         : await argon2.hash(message.password, ARGON2_OPTIONS);
     const uploaderToken = randomBytes(32).toString("hex");
@@ -404,12 +405,20 @@ const handleMessage = async (
           "password_failed",
           locked,
         );
-        sendError(
-          session.socket,
-          "BAD_PASSWORD",
-          "That password does not match.",
-          Math.max(0, ROOM_AUTH_FAILURE_LIMIT - room.passwordFailures),
-        );
+        if (locked) {
+          sendError(
+            session.socket,
+            "ROOM_LOCKED",
+            "That room is locked after too many failed password attempts.",
+          );
+        } else {
+          sendError(
+            session.socket,
+            "BAD_PASSWORD",
+            "That password does not match.",
+            Math.max(0, ROOM_AUTH_FAILURE_LIMIT - room.passwordFailures),
+          );
+        }
         return;
       }
       rooms.resetPasswordFailures(room);

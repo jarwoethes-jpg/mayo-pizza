@@ -1,6 +1,7 @@
 import {
   type ChangeEvent,
   type DragEvent,
+  type FormEvent,
   useEffect,
   useReducer,
   useRef,
@@ -13,7 +14,8 @@ import {
   mapInputFiles,
 } from "./folder/entries";
 import { createPeer, type PeerConnection, type PeerRole } from "./net/peer";
-import { createSignalingClient } from "./net/signaling";
+import { classifySelectedRoute, type SelectedRoute } from "./net/route";
+import { createSignalingClient, type SignalingError } from "./net/signaling";
 import {
   createTransferController,
   type TransferManifestInfo,
@@ -23,14 +25,20 @@ import {
 import { getSinkOverride, getSinkStrategy } from "./sink";
 import { getFailureCopy } from "./ui/copy";
 import { formatBytes, formatEta, formatTransferRate } from "./ui/format";
+import { PrivacyPage } from "./ui/legal";
+import {
+  getPasswordPromptCopy,
+  type PasswordPromptState,
+  passwordPromptReducer,
+} from "./ui/password";
+import { makeRoomShareUrl, normalizeRoomPassword } from "./ui/room";
 import { initialTransferUiState, transferUiReducer } from "./ui/state";
+import { TermsPage } from "./ui/terms";
 import "./styles.css";
 
 interface RoomViewProps {
   role: PeerRole;
   slug?: string;
-  /** Passwords are intentionally URL-seeded because room creation is automatic. */
-  password?: string;
 }
 
 type SessionStatus =
@@ -72,7 +80,7 @@ const getSessionCopy = (
 };
 
 const getTechnicalShareUrl = (slug: string): string =>
-  new URL(`/${encodeURIComponent(slug)}`, window.location.origin).toString();
+  makeRoomShareUrl(window.location.origin, slug);
 
 const escapeAttribute = (value: string): string =>
   value
@@ -87,8 +95,20 @@ const addQrAccessibility = (svg: string, url: string): string =>
     `<svg role="img" aria-label="QR code for ${escapeAttribute(url)}"`,
   );
 
-const RoomView = ({ role, slug, password }: RoomViewProps) => {
+const RoomView = ({ role, slug }: RoomViewProps) => {
   const [roomSlug, setRoomSlug] = useState(slug);
+  const [roomPassword, setRoomPassword] = useState<string | undefined>(
+    undefined,
+  );
+  const [passwordAttempt, setPasswordAttempt] = useState<string | undefined>(
+    undefined,
+  );
+  const [passwordPromptState, setPasswordPromptState] = useState<
+    PasswordPromptState | undefined
+  >(undefined);
+  const [selectedRoute, setSelectedRoute] = useState<SelectedRoute | undefined>(
+    undefined,
+  );
   const [connectionState, setConnectionState] =
     useState<RTCPeerConnectionState>("new");
   const [sessionStatus, setSessionStatus] =
@@ -134,6 +154,7 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
   const [qrLoading, setQrLoading] = useState(false);
   const [passwordDraft, setPasswordDraft] = useState("");
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const passwordInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const peerRef = useRef<PeerConnection | undefined>(undefined);
   const transferRef = useRef<
@@ -144,8 +165,10 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
   const resumePendingRef = useRef(false);
   const dragDepthRef = useRef(0);
   const progressAnnouncedRef = useRef(false);
+  const routeStatSentRef = useRef(false);
 
   useEffect(() => {
+    routeStatSentRef.current = false;
     const signaling = createSignalingClient();
     const peer = createPeer(role, signaling);
     const transfer = createTransferController(role, peer, {
@@ -263,6 +286,25 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
       setLog("Ctrl channel open.");
       sendAutoPing();
     });
+    const unsubscribeData = peer.on("data-open", () => {
+      if (role !== "downloader" || routeStatSentRef.current) {
+        return;
+      }
+      routeStatSentRef.current = true;
+      void peer
+        .getStats()
+        .then((stats) => classifySelectedRoute(stats))
+        .then((route) => {
+          if (route === undefined) {
+            return;
+          }
+          setSelectedRoute(route);
+          return signaling.send({ t: "stat", event: "connected", route });
+        })
+        .catch(() => {
+          // Route telemetry is deliberately best-effort and never gates a transfer.
+        });
+    });
     const unsubscribeReconnecting = peer.on("reconnecting", () => {
       setSessionStatus("reconnecting");
       setSessionNotice(undefined);
@@ -280,13 +322,13 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
       );
       setLog("Connection’s back. Resuming your slice…");
     });
-    const unsubscribeExhausted = peer.on("exhausted", () => {
+    const unsubscribeExhausted = peer.on("exhausted", ({ error }) => {
       resumePendingRef.current = false;
       setSessionStatus("failed");
-      setSessionFailureReason("connection recovery exhausted");
-      setAnnouncement(
-        getFailureCopy("connection recovery exhausted", role).message,
-      );
+      const reason = error?.message ?? "connection recovery exhausted";
+      setSessionFailureReason(reason);
+      dispatchTransferUi({ type: "error", message: reason });
+      setAnnouncement(getFailureCopy(reason, role).message);
       setLog("Slice dropped. We couldn’t recover the connection.");
     });
     const unsubscribePeerGone = peer.on("peer-gone", () => {
@@ -324,17 +366,51 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
 
     const run = async (): Promise<void> => {
       try {
-        const roomPassword = password?.trim() || undefined;
+        const authenticationPassword =
+          role === "uploader" ? roomPassword : passwordAttempt;
         if (role === "uploader") {
-          const created = await signaling.create(roomPassword);
+          const created = await signaling.create(authenticationPassword);
           setRoomSlug(created.slug);
           setLog("Room created. Waiting for a receiver…");
         } else if (slug !== undefined) {
-          await signaling.join(slug, roomPassword);
+          await signaling.join(slug, authenticationPassword);
+          setPasswordPromptState(undefined);
           setLog("Joined room. Waiting for the sender…");
         }
         await peer.ready;
       } catch (error) {
+        const signalingError = error as Partial<SignalingError>;
+        if (
+          role === "downloader" &&
+          (signalingError.code === "PASSWORD_REQUIRED" ||
+            signalingError.code === "BAD_PASSWORD" ||
+            signalingError.code === "ROOM_LOCKED")
+        ) {
+          const passwordLocked =
+            signalingError.code === "ROOM_LOCKED" ||
+            (signalingError.code === "BAD_PASSWORD" &&
+              signalingError.attemptsRemaining === 0);
+          const nextState = passwordPromptReducer(
+            undefined,
+            signalingError.code === "PASSWORD_REQUIRED"
+              ? { type: "required" }
+              : passwordLocked
+                ? { type: "locked" }
+                : {
+                    type: "wrong",
+                    ...(signalingError.attemptsRemaining === undefined
+                      ? {}
+                      : {
+                          attemptsRemaining: signalingError.attemptsRemaining,
+                        }),
+                  },
+          );
+          setPasswordPromptState(nextState);
+          const copy = getPasswordPromptCopy(nextState);
+          setAnnouncement(copy.message);
+          setLog(error instanceof Error ? error.message : copy.message);
+          return;
+        }
         setSessionStatus("failed");
         const message =
           error instanceof Error ? error.message : "Connection failed.";
@@ -349,6 +425,7 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
       unsubscribeConnection();
       unsubscribeIce();
       unsubscribeCtrl();
+      unsubscribeData();
       unsubscribeReconnecting();
       unsubscribeResuming();
       unsubscribeExhausted();
@@ -364,7 +441,7 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
       peerRef.current = undefined;
       transferRef.current = undefined;
     };
-  }, [password, role, slug]);
+  }, [passwordAttempt, role, roomPassword, slug]);
 
   const sendPing = (): void => {
     const peer = peerRef.current;
@@ -609,6 +686,31 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
     }
   };
 
+  const commitRoomPassword = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    if (role !== "uploader" || passwordRoomIsActive) {
+      return;
+    }
+    const nextPassword = normalizeRoomPassword(passwordDraft);
+    setRoomPassword(nextPassword);
+    setPasswordDraft(nextPassword ?? "");
+    setAnnouncement(
+      nextPassword === undefined
+        ? "This room stays open. No password was added."
+        : "Fresh room incoming! Setting a password creates a new room and changes the slug, so update any link you have already shared.",
+    );
+  };
+
+  const submitRoomPassword = (event: FormEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    if (passwordPromptState?.view === "password-locked") {
+      return;
+    }
+    setPasswordAttempt(passwordDraft);
+    setSessionStatus("connecting");
+    setAnnouncement("Checking that password before we show the slice.");
+  };
+
   const progressText =
     transferProgress === undefined
       ? "—"
@@ -633,34 +735,47 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
     transferProgress.bytesDone >= transferProgress.totalBytes;
   const failureReason = transferUi.errorMessage ?? "The transfer failed.";
   const failureCopy = getFailureCopy(failureReason, role);
+  const passwordPromptCopy =
+    passwordPromptState === undefined
+      ? undefined
+      : getPasswordPromptCopy(passwordPromptState);
   const sessionCopy =
     sessionNotice ?? getSessionCopy(sessionStatus, role, sessionFailureReason);
   const humanCopy =
-    pendingManifest !== undefined
-      ? "A fresh slice just landed. Check the details, then grab it when you’re ready."
-      : transferUi.phase === "staged"
-        ? `Nice slice! ${stagedSelection?.name ?? "Your file"} is staged and ready to travel.`
-        : transferUi.phase === "complete"
-          ? "Slice landed! It’s verified and ready to enjoy."
-          : transferUi.phase === "failed"
-            ? failureCopy.message
-            : transferUi.phase === "cancelled"
-              ? getFailureCopy("cancelled", role).message
-              : isVerifying
-                ? "The slice made it. We’re checking every crumb now."
-                : transferUi.phase === "transferring"
-                  ? "Your slice is on the move. Keep this tab open while it travels."
-                  : sessionCopy;
+    passwordPromptCopy !== undefined
+      ? passwordPromptCopy.message
+      : pendingManifest !== undefined
+        ? "A fresh slice just landed. Check the details, then grab it when you’re ready."
+        : transferUi.phase === "staged"
+          ? `Nice slice! ${stagedSelection?.name ?? "Your file"} is staged and ready to travel.`
+          : transferUi.phase === "complete"
+            ? "Slice landed! It’s verified and ready to enjoy."
+            : transferUi.phase === "failed"
+              ? failureCopy.message
+              : transferUi.phase === "cancelled"
+                ? getFailureCopy("cancelled", role).message
+                : isVerifying
+                  ? "The slice made it. We’re checking every crumb now."
+                  : transferUi.phase === "transferring"
+                    ? "Your slice is on the move. Keep this tab open while it travels."
+                    : sessionCopy;
   const viewKey =
-    pendingManifest !== undefined ? "manifest" : `${role}-${transferUi.phase}`;
+    passwordPromptState !== undefined
+      ? passwordPromptState.view
+      : pendingManifest !== undefined
+        ? "manifest"
+        : `${role}-${transferUi.phase}`;
 
   useEffect(() => {
     if (viewKey !== "") {
       headingRef.current?.focus();
+      if (passwordPromptState?.view === "password-wrong") {
+        passwordInputRef.current?.focus();
+      }
     }
-  }, [viewKey]);
+  }, [passwordPromptState, viewKey]);
 
-  const passwordRoomIsActive = password !== undefined && password.trim() !== "";
+  const passwordRoomIsActive = roomPassword !== undefined;
 
   return (
     <main
@@ -693,7 +808,8 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
 
           <div className="mt-8 grid gap-4">
             <h2 ref={headingRef} className="view-heading" tabIndex={-1}>
-              {role === "uploader" ? "Send a slice" : "Receive a slice"}
+              {passwordPromptCopy?.heading ??
+                (role === "uploader" ? "Send a slice" : "Receive a slice")}
             </h2>
             <p className="voice-copy">{humanCopy}</p>
             {isDragging && role === "uploader" && (
@@ -704,7 +820,7 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
             )}
           </div>
 
-          {roomSlug !== undefined && (
+          {roomSlug !== undefined && passwordPromptState === undefined && (
             <p className="mt-6 muted">
               Room:{" "}
               <span className="mono" data-testid="slug">
@@ -770,6 +886,50 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
                 </div>
               )}
 
+              <details
+                className="password-panel"
+                data-testid="password-panel"
+                open={passwordRoomIsActive || undefined}
+              >
+                <summary>
+                  {passwordRoomIsActive
+                    ? "Password room is on"
+                    : "Lock this room (optional)"}
+                </summary>
+                <form onSubmit={commitRoomPassword}>
+                  <label className="password-field">
+                    <span>Room password</span>
+                    <input
+                      aria-describedby="password-note"
+                      data-testid="password-input"
+                      disabled={passwordRoomIsActive}
+                      onChange={(event) => setPasswordDraft(event.target.value)}
+                      placeholder={
+                        passwordRoomIsActive
+                          ? "Password set for this room"
+                          : "Set before opening a room"
+                      }
+                      type="password"
+                      value={passwordDraft}
+                    />
+                  </label>
+                  <p className="password-note" id="password-note">
+                    {passwordRoomIsActive
+                      ? "This room is protected. Setting it created a fresh room, so its slug changed."
+                      : "Commit a password to create a fresh room. The slug will change, so update any link you have already shared."}
+                  </p>
+                  {!passwordRoomIsActive && (
+                    <button
+                      className="button button--secondary mt-3"
+                      data-testid="password-commit"
+                      type="submit"
+                    >
+                      Set room password
+                    </button>
+                  )}
+                </form>
+              </details>
+
               {skippedCount !== undefined && (
                 <p className="muted" data-testid="skipped-count">
                   Skipped {skippedCount} system files
@@ -823,38 +983,9 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
                     <div>
                       <p className="muted">
                         {passwordRoomIsActive
-                          ? "This room has a password tucked inside its link."
+                          ? "This room is protected. The password stays out of the room link."
                           : "Your slice is ready to travel peer to peer."}
                       </p>
-                      <details className="password-panel">
-                        <summary>
-                          {passwordRoomIsActive
-                            ? "Password room is on"
-                            : "Lock this room (optional)"}
-                        </summary>
-                        <label className="password-field">
-                          <span>Room password</span>
-                          <input
-                            aria-describedby="password-note"
-                            disabled={passwordRoomIsActive}
-                            onChange={(event) =>
-                              setPasswordDraft(event.target.value)
-                            }
-                            placeholder={
-                              passwordRoomIsActive
-                                ? "Password set before room creation"
-                                : "Set before opening a room"
-                            }
-                            type="password"
-                            value={passwordDraft}
-                          />
-                        </label>
-                        <p className="password-note" id="password-note">
-                          {passwordRoomIsActive
-                            ? "This room was opened with a password before anyone joined."
-                            : "Room creation starts as soon as you land here. To use a password, open this page with a password query before sharing the room."}
-                        </p>
-                      </details>
                     </div>
                     <div className="qr-wrap">
                       {qrSvg !== undefined ? (
@@ -908,165 +1039,226 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
             </div>
           )}
 
-          {role === "downloader" && pendingManifest !== undefined && (
-            <div className="mt-6 grid gap-4">
-              <article className="manifest-card" data-testid="manifest-preview">
-                <div className="manifest-card__header">
-                  <div>
-                    <p className="file-name">{pendingManifest.suggestedName}</p>
-                    <p className="mono muted">
-                      {formatBytes(pendingManifest.totalBytes)}
-                    </p>
+          {role === "downloader" && passwordPromptState !== undefined && (
+            <form
+              className="password-prompt mt-6"
+              data-testid="password-prompt"
+              onSubmit={submitRoomPassword}
+            >
+              <label className="password-field">
+                <span>Room password</span>
+                <input
+                  ref={passwordInputRef}
+                  aria-describedby="password-prompt-note"
+                  autoComplete="current-password"
+                  data-testid="password-input"
+                  disabled={passwordPromptState.view === "password-locked"}
+                  onChange={(event) => setPasswordDraft(event.target.value)}
+                  type="password"
+                  value={passwordDraft}
+                />
+              </label>
+              <p className="password-note" id="password-prompt-note">
+                {passwordPromptCopy?.message}
+              </p>
+              {passwordPromptState.view !== "password-locked" && (
+                <button
+                  className="button button--primary"
+                  data-testid="password-submit"
+                  type="submit"
+                >
+                  Open the room
+                </button>
+              )}
+            </form>
+          )}
+
+          {role === "downloader" &&
+            passwordPromptState === undefined &&
+            pendingManifest !== undefined && (
+              <div className="mt-6 grid gap-4">
+                <article
+                  className="manifest-card"
+                  data-testid="manifest-preview"
+                >
+                  <div className="manifest-card__header">
+                    <div>
+                      <p className="file-name">
+                        {pendingManifest.suggestedName}
+                      </p>
+                      <p className="mono muted">
+                        {formatBytes(pendingManifest.totalBytes)}
+                      </p>
+                    </div>
+                    <span className="mono muted">
+                      {pendingManifest.mode === "zip"
+                        ? "folder slice"
+                        : "file slice"}
+                    </span>
                   </div>
-                  <span className="mono muted">
-                    {pendingManifest.mode === "zip"
-                      ? "folder slice"
-                      : "file slice"}
+                  {pendingManifest.mode === "zip" && (
+                    <p className="mono muted">
+                      <span data-testid="manifest-file-count">
+                        {pendingManifest.items.length}
+                      </span>{" "}
+                      files · {pendingManifest.totalBytes} bytes
+                    </p>
+                  )}
+                  <div className="button-row">
+                    <button
+                      className="button button--primary"
+                      data-testid="accept-transfer"
+                      onClick={acceptTransfer}
+                      type="button"
+                    >
+                      Grab your slice
+                    </button>
+                    <button
+                      className="button button--ghost"
+                      data-testid="reject-transfer"
+                      onClick={rejectTransfer}
+                      type="button"
+                    >
+                      Put it back
+                    </button>
+                  </div>
+                </article>
+              </div>
+            )}
+
+          {role === "downloader" &&
+            passwordPromptState === undefined &&
+            transferProgress !== undefined && (
+              <section
+                className="mt-6 transfer-panel"
+                aria-label="Transfer progress"
+              >
+                <div className="progress-track" aria-hidden="true">
+                  <div
+                    className="progress-fill"
+                    style={{ width: `${progressPercent}%` }}
+                  />
+                </div>
+                <div className="progress-stats">
+                  <span className="mono">{progressText}</span>
+                  <span className="mono">
+                    {formatTransferRate(transferProgress.bytesPerSec)} · ETA{" "}
+                    {formatEta(remainingBytes, transferProgress.bytesPerSec)}
                   </span>
                 </div>
-                {pendingManifest.mode === "zip" && (
-                  <p className="mono muted">
-                    <span data-testid="manifest-file-count">
-                      {pendingManifest.items.length}
-                    </span>{" "}
-                    files · {pendingManifest.totalBytes} bytes
-                  </p>
-                )}
-                <div className="button-row">
-                  <button
-                    className="button button--primary"
-                    data-testid="accept-transfer"
-                    onClick={acceptTransfer}
-                    type="button"
-                  >
-                    Grab your slice
-                  </button>
-                  <button
-                    className="button button--ghost"
-                    data-testid="reject-transfer"
-                    onClick={rejectTransfer}
-                    type="button"
-                  >
-                    Put it back
-                  </button>
-                </div>
-              </article>
-            </div>
-          )}
+              </section>
+            )}
 
-          {role === "downloader" && transferProgress !== undefined && (
-            <section
-              className="mt-6 transfer-panel"
-              aria-label="Transfer progress"
-            >
-              <div className="progress-track" aria-hidden="true">
-                <div
-                  className="progress-fill"
-                  style={{ width: `${progressPercent}%` }}
-                />
-              </div>
-              <div className="progress-stats">
-                <span className="mono">{progressText}</span>
-                <span className="mono">
-                  {formatTransferRate(transferProgress.bytesPerSec)} · ETA{" "}
-                  {formatEta(remainingBytes, transferProgress.bytesPerSec)}
-                </span>
-              </div>
-            </section>
-          )}
-
-          {transferUi.phase === "failed" && (
-            <div className="failure-card mt-6" role="alert">
-              <h3>{failureCopy.heading}</h3>
-              <p className="voice-copy">{failureCopy.message}</p>
-              <details className="error-detail">
-                <summary>Show the technical crumb trail</summary>
-                <code>{failureReason}</code>
-              </details>
-            </div>
-          )}
-
-          <div className="result-line mt-6" data-testid="transfer-result">
-            {transferUi.phase === "complete" && transferResult?.verified ? (
-              `Transfer result: verified=true sha256=${transferResult.sha256}`
-            ) : transferUi.phase === "failed" &&
-              transferResult !== undefined ? (
-              <>
-                Transfer result: failed — {failureCopy.message}{" "}
+          {passwordPromptState === undefined &&
+            transferUi.phase === "failed" && (
+              <div className="failure-card mt-6" role="alert">
+                <h3>{failureCopy.heading}</h3>
+                <p className="voice-copy">{failureCopy.message}</p>
                 <details className="error-detail">
-                  <summary>Technical details</summary>
-                  <code>
-                    verified=false sha256={transferResult.sha256}
-                    {transferResult.expectedSha256 === undefined
-                      ? ""
-                      : ` expectedSha256=${transferResult.expectedSha256}`}
-                  </code>
-                </details>
-              </>
-            ) : transferUi.phase === "failed" ? (
-              <>
-                Transfer result: failed — {failureCopy.message}{" "}
-                <details className="error-detail">
-                  <summary>Technical details</summary>
+                  <summary>Show the technical crumb trail</summary>
                   <code>{failureReason}</code>
                 </details>
-              </>
-            ) : transferUi.phase === "cancelled" ? (
-              "Transfer result: cancelled"
-            ) : (
-              "Transfer result: pending"
+              </div>
             )}
-          </div>
 
-          <p className="status-banner mt-6" role="status">
-            <span className="status-banner__label">Room status</span>
-            <span>{humanCopy}</span>
-          </p>
-
-          <details className="mt-4">
-            <summary className="muted">Under the hood</summary>
-            <div className="technical-grid mt-3">
-              <dl className="technical-grid__row">
-                <dt>Connection</dt>
-                <dd data-testid="connection-state">{connectionState}</dd>
-              </dl>
-              <dl className="technical-grid__row">
-                <dt>Session</dt>
-                <dd data-testid="session-status">{sessionStatus}</dd>
-              </dl>
-              <dl className="technical-grid__row">
-                <dt>ICE</dt>
-                <dd>{iceConnectionState}</dd>
-              </dl>
-              <dl className="technical-grid__row">
-                <dt>Last pong</dt>
-                <dd data-testid="last-pong">{lastPong}</dd>
-              </dl>
-              <dl className="technical-grid__row">
-                <dt>Transfer</dt>
-                <dd data-testid="progress">{progressText}</dd>
-              </dl>
-              <dl className="technical-grid__row">
-                <dt>Buffered</dt>
-                <dd data-testid="buffered-amount">{bufferedAmount}</dd>
-              </dl>
-              <dl className="technical-grid__row">
-                <dt>Sink</dt>
-                <dd data-testid="sink-strategy">{getSinkStrategy()}</dd>
-              </dl>
-              <p className="muted text-xs">
-                Peak buffered:{" "}
-                <span className="mono">{maxBufferedAmount} bytes</span>
-              </p>
-              <p data-testid="log" className="muted text-xs">
-                {log}
-              </p>
+          {passwordPromptState === undefined && (
+            <div className="result-line mt-6" data-testid="transfer-result">
+              {transferUi.phase === "complete" && transferResult?.verified ? (
+                `Transfer result: verified=true sha256=${transferResult.sha256}`
+              ) : transferUi.phase === "failed" &&
+                transferResult !== undefined ? (
+                <>
+                  Transfer result: failed — {failureCopy.message}{" "}
+                  <details className="error-detail">
+                    <summary>Technical details</summary>
+                    <code>
+                      verified=false sha256={transferResult.sha256}
+                      {transferResult.expectedSha256 === undefined
+                        ? ""
+                        : ` expectedSha256=${transferResult.expectedSha256}`}
+                    </code>
+                  </details>
+                </>
+              ) : transferUi.phase === "failed" ? (
+                <>
+                  Transfer result: failed — {failureCopy.message}{" "}
+                  <details className="error-detail">
+                    <summary>Technical details</summary>
+                    <code>{failureReason}</code>
+                  </details>
+                </>
+              ) : transferUi.phase === "cancelled" ? (
+                "Transfer result: cancelled"
+              ) : (
+                "Transfer result: pending"
+              )}
             </div>
-          </details>
+          )}
+
+          {passwordPromptState === undefined && (
+            <p className="status-banner mt-6" role="status">
+              <span className="status-banner__label">Room status</span>
+              <span>{humanCopy}</span>
+            </p>
+          )}
+
+          {passwordPromptState === undefined && (
+            <details className="mt-4">
+              <summary className="muted">Under the hood</summary>
+              <div className="technical-grid mt-3">
+                <dl className="technical-grid__row">
+                  <dt>Connection</dt>
+                  <dd data-testid="connection-state">{connectionState}</dd>
+                </dl>
+                <dl className="technical-grid__row">
+                  <dt>Session</dt>
+                  <dd data-testid="session-status">{sessionStatus}</dd>
+                </dl>
+                <dl className="technical-grid__row">
+                  <dt>ICE</dt>
+                  <dd>{iceConnectionState}</dd>
+                </dl>
+                <dl className="technical-grid__row">
+                  <dt>Last pong</dt>
+                  <dd data-testid="last-pong">{lastPong}</dd>
+                </dl>
+                <dl className="technical-grid__row">
+                  <dt>Transfer</dt>
+                  <dd data-testid="progress">{progressText}</dd>
+                </dl>
+                <dl className="technical-grid__row">
+                  <dt>Buffered</dt>
+                  <dd data-testid="buffered-amount">{bufferedAmount}</dd>
+                </dl>
+                <dl className="technical-grid__row">
+                  <dt>Sink</dt>
+                  <dd data-testid="sink-strategy">{getSinkStrategy()}</dd>
+                </dl>
+                <p className="muted text-xs">
+                  Peak buffered:{" "}
+                  <span className="mono">{maxBufferedAmount} bytes</span>
+                </p>
+                <p data-testid="log" className="muted text-xs">
+                  {log}
+                </p>
+              </div>
+            </details>
+          )}
 
           <footer className="privacy-note">
-            Your files never touch our servers. Sometimes they take the scenic
-            route (encrypted) — but even then, we can’t read a byte.
+            {selectedRoute === "relay" && (
+              <p className="relay-note" data-testid="relay-note">
+                This connection is taking the relayed route: encrypted bytes
+                pass through our relay, but we still can’t read them.{" "}
+                <a href="/privacy">Learn more in privacy.</a>
+              </p>
+            )}
+            {selectedRoute !== "relay" &&
+              "On a direct path, your files travel peer to peer. If we use TURN, encrypted bytes pass through our relay; we still can’t read them."}
+            <span className="legal-links">
+              <a href="/privacy">Privacy</a>
+              <a href="/terms">Terms &amp; abuse</a>
+            </span>
           </footer>
         </div>
       </section>
@@ -1077,32 +1269,52 @@ const RoomView = ({ role, slug, password }: RoomViewProps) => {
   );
 };
 
-const getRoute = (): RoomViewProps => {
+type AppRoute =
+  | ({ kind: "room" } & RoomViewProps)
+  | { kind: "privacy" }
+  | { kind: "terms" };
+
+const getRoute = (): AppRoute => {
   const path = window.location.pathname.replace(/^\/+|\/+$/g, "");
-  const password =
-    new URLSearchParams(window.location.search).get("password") ?? undefined;
+  if (path === "privacy") {
+    return { kind: "privacy" };
+  }
+  if (path === "terms") {
+    return { kind: "terms" };
+  }
   if (path === "") {
-    return {
-      role: "uploader",
-      ...(password === undefined ? {} : { password }),
-    };
+    return { kind: "room", role: "uploader" };
   }
   try {
     return {
+      kind: "room",
       role: "downloader",
       slug: decodeURIComponent(path),
-      ...(password === undefined ? {} : { password }),
     };
   } catch {
     return {
+      kind: "room",
       role: "downloader",
       slug: path,
-      ...(password === undefined ? {} : { password }),
     };
   }
 };
 
-const App = () => <RoomView {...getRoute()} />;
+const App = () => {
+  const route = getRoute();
+  if (route.kind === "privacy") {
+    return <PrivacyPage />;
+  }
+  if (route.kind === "terms") {
+    return <TermsPage />;
+  }
+  return (
+    <RoomView
+      role={route.role}
+      {...(route.slug === undefined ? {} : { slug: route.slug })}
+    />
+  );
+};
 
 const rootElement = document.getElementById("root");
 

@@ -80,7 +80,7 @@ export interface PeerEventMap {
   "peer-gone": { peerId: string };
   reconnecting: undefined;
   resuming: undefined;
-  exhausted: undefined;
+  exhausted: { error?: Error };
   pong: Extract<CtrlMessage, { t: "pong" }>;
   error: PeerError;
 }
@@ -114,6 +114,8 @@ export interface PeerConnection {
   sendPing(nonce?: string): string;
   /** Test-only hook for forcing the same recovery path as a broken network. */
   debugDrop(): void;
+  /** Returns the current peer stats for best-effort route reporting. */
+  getStats(): Promise<RTCStatsReport>;
   close(): void;
 }
 
@@ -273,9 +275,15 @@ class PeerConnectionImpl implements PeerConnection {
       signaling.on("protocol-error", ({ message }) =>
         this.emitError(new Error(message)),
       ),
-      signaling.on("error", (message) =>
-        this.emitError(new Error(`${message.code}: ${message.message}`)),
-      ),
+      signaling.on("error", (message) => {
+        if (message.code === "BAD_SLUG") {
+          const error = new Error(`${message.code}: ${message.message}`);
+          this.emitError(error);
+          this.emitExhausted(error);
+          return;
+        }
+        this.emitError(new Error(`${message.code}: ${message.message}`));
+      }),
     );
     this.ready = this.start();
     void this.ready.catch(() => undefined);
@@ -341,6 +349,13 @@ class PeerConnectionImpl implements PeerConnection {
 
   public debugDrop(): void {
     this.peerConnection?.close();
+  }
+
+  public async getStats(): Promise<RTCStatsReport> {
+    if (this.peerConnection === undefined) {
+      return new Map() as RTCStatsReport;
+    }
+    return this.peerConnection.getStats();
   }
 
   public close(): void {
@@ -844,7 +859,7 @@ class PeerConnectionImpl implements PeerConnection {
     }
   }
 
-  private emitExhausted(): void {
+  private emitExhausted(error?: Error): void {
     if (this.closed) {
       return;
     }
@@ -852,7 +867,7 @@ class PeerConnectionImpl implements PeerConnection {
     this.clearRecoveryTimers();
     this.ctrlProtocol?.dispose();
     this.peerConnection?.close();
-    this.emit("exhausted", undefined);
+    this.emit("exhausted", error === undefined ? {} : { error });
   }
 
   private emitError(error: unknown): void {

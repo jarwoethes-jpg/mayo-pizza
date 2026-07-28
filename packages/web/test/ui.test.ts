@@ -80,5 +80,11 @@ describe("failure copy mapping", () => {
       getFailureCopy("Could not prepare the download sink.", "downloader")
         .heading,
     ).toBe("The save spot got messy.");
+    expect(
+      getFailureCopy(
+        "File System Access is unavailable in this browser.",
+        "downloader",
+      ).heading,
+    ).toBe("The save spot got messy.");
   });
 });

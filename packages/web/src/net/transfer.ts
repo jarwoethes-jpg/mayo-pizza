@@ -2,7 +2,13 @@ import { predictLength } from "client-zip";
 import type { TransferMessage } from "shared";
 import type { FolderEntry } from "../folder/entries";
 import { makeZipPlan, ZIP_DIRECTORY_LAST_MODIFIED } from "../folder/zipPlan";
-import { createSink, type Sink, type SinkFactory, SinkManager } from "../sink";
+import {
+  createSink,
+  SINK_PROGRESS_WATCHDOG_MS,
+  type Sink,
+  type SinkFactory,
+  SinkManager,
+} from "../sink";
 import type {
   ReceiverWorkerCommand,
   ReceiverWorkerEvent,
@@ -17,6 +23,8 @@ export const READ_SLICE = 4 * 1024 * 1024;
 export const HIGH_WATERMARK = 8 * 1024 * 1024;
 export const ACK_INTERVAL = 4 * 1024 * 1024;
 const BUFFERED_AMOUNT_REPORT_INTERVAL = 200;
+
+export { SINK_PROGRESS_WATCHDOG_MS } from "../sink/watchdog";
 
 export type TransferSide = "sender" | "receiver";
 
@@ -339,14 +347,23 @@ export class TransferController {
   private receiverDoneMessage:
     | Extract<TransferMessage, { t: "done" }>
     | undefined;
+  private receiverDoneEvent:
+    | {
+        event: Extract<ReceiverWorkerEvent, { t: "done" }>;
+        worker: WorkerLike<ReceiverWorkerCommand, ReceiverWorkerEvent>;
+      }
+    | undefined;
+  private readonly receiverCommitPromises = new Set<Promise<void>>();
+  private receiverCommitWatchdogTimer:
+    | ReturnType<typeof globalThis.setTimeout>
+    | undefined;
   private destroyed = false;
   private ctrlOpen = false;
   private dataOpen = false;
   private ctrlOpenCount = 0;
   private currentCtrl: CtrlProtocol | undefined;
   private currentData: RTCDataChannel | undefined;
-  private resolveChannels: (() => void) | undefined;
-  private channelsReady: Promise<void>;
+  private readonly channelWaiters = new Set<() => void>();
 
   public constructor(
     private readonly role: "uploader" | "downloader",
@@ -355,9 +372,6 @@ export class TransferController {
   ) {
     this.peer = peer;
     this.options = options;
-    this.channelsReady = new Promise((resolve) => {
-      this.resolveChannels = resolve;
-    });
     this.unsubs.push(
       peer.on("ctrl-open", () => {
         this.refreshChannelGeneration();
@@ -400,7 +414,7 @@ export class TransferController {
       throw new Error("The transfer controller is closed.");
     }
     this.teardownActiveTransfer();
-    await this.channelsReady;
+    await this.waitForChannels();
     if (this.destroyed) {
       return;
     }
@@ -457,7 +471,7 @@ export class TransferController {
     }
 
     this.teardownActiveTransfer();
-    await this.channelsReady;
+    await this.waitForChannels();
     if (this.destroyed) {
       return;
     }
@@ -584,7 +598,11 @@ export class TransferController {
     for (const unsubscribe of this.unsubs.splice(0)) {
       unsubscribe();
     }
-    this.resolveChannels?.();
+    const waiters = [...this.channelWaiters];
+    this.channelWaiters.clear();
+    for (const resolve of waiters) {
+      resolve();
+    }
   }
 
   private handleManifest(
@@ -887,31 +905,38 @@ export class TransferController {
         this.fail("The receiver sink is not ready.");
         return;
       }
-      this.receiverSinkForwardedBytes += event.buffer.byteLength;
+      // The service-worker sink transfers this buffer during write, detaching it
+      // so reading byteLength after the write would report zero.
+      const chunkBytes = event.buffer.byteLength;
+      this.receiverSinkForwardedBytes += chunkBytes;
       if (this.receiverSinkForwardedBytes > this.receiverTotalBytes) {
         this.fail("The receiver worker exceeded the manifest size.");
         return;
       }
       this.receiverInFlightCommits += 1;
-      void sinkManager
-        .write(new Uint8Array(event.buffer))
-        .then(() => {
+      const commit = sinkManager.write(new Uint8Array(event.buffer));
+      this.receiverCommitPromises.add(commit);
+      void commit.then(
+        () => {
           this.receiverInFlightCommits = Math.max(
             0,
             this.receiverInFlightCommits - 1,
           );
+          this.receiverCommitPromises.delete(commit);
           if (this.destroyed || this.receiverWorker !== worker) {
             return;
           }
-          this.receiverCommittedBytes += event.buffer.byteLength;
+          this.receiverCommittedBytes += chunkBytes;
           worker.postMessage({ t: "commit", chunkId: event.chunkId });
           this.maybeResumeReceiver();
-        })
-        .catch((error: unknown) => {
+          this.maybeCompleteReceiverDone();
+        },
+        (error: unknown) => {
           this.receiverInFlightCommits = Math.max(
             0,
             this.receiverInFlightCommits - 1,
           );
+          this.receiverCommitPromises.delete(commit);
           if (this.destroyed || this.receiverWorker !== worker) {
             return;
           }
@@ -922,7 +947,8 @@ export class TransferController {
             // The worker may already be terminating after the sink failure.
           }
           this.fail(message);
-        });
+        },
+      );
       this.maybeFinishReceiver();
       return;
     }
@@ -936,15 +962,45 @@ export class TransferController {
       this.fail("The receiver worker sent an invalid terminal event.");
       return;
     }
+    if (this.receiverInFlightCommits > 0) {
+      this.receiverDoneEvent = { event, worker };
+      this.armReceiverCommitWatchdog();
+      void this.waitForReceiverCommits();
+      return;
+    }
+    this.finishReceiverDone(event, worker);
+  }
+
+  private finishReceiverDone(
+    event: Extract<ReceiverWorkerEvent, { t: "done" }>,
+    worker: WorkerLike<ReceiverWorkerCommand, ReceiverWorkerEvent>,
+  ): void {
     if (
+      this.destroyed ||
+      this.receiverWorker !== worker ||
       !this.receiverFinishRequested ||
       !this.receiverStarted ||
       this.receiverSinkManager === undefined ||
       this.receiverCommittedBytes < this.receiverTotalBytes
     ) {
-      this.fail("The receiver worker finished before the sink was drained.");
+      if (!this.destroyed) {
+        const failedConditions = [
+          this.receiverWorker !== worker ? "workerMismatch" : undefined,
+          !this.receiverFinishRequested ? "finishRequested" : undefined,
+          !this.receiverStarted ? "started" : undefined,
+          this.receiverSinkManager === undefined ? "hasSink" : undefined,
+          this.receiverCommittedBytes < this.receiverTotalBytes
+            ? `committed=${this.receiverCommittedBytes}/${this.receiverTotalBytes}`
+            : undefined,
+        ].filter((condition): condition is string => condition !== undefined);
+        this.fail(
+          `The receiver worker finished before the sink was drained. (${failedConditions.join(", ")})`,
+        );
+      }
       return;
     }
+    this.receiverDoneEvent = undefined;
+    this.clearReceiverCommitWatchdog();
     const doneMessage = this.receiverDoneMessage;
     const verified =
       doneMessage !== undefined &&
@@ -968,6 +1024,49 @@ export class TransferController {
     }
     this.options.onResult?.(result);
     this.teardownActiveTransfer();
+  }
+
+  private async waitForReceiverCommits(): Promise<void> {
+    const pending = this.receiverDoneEvent;
+    if (pending === undefined) {
+      return;
+    }
+    await Promise.allSettled([...this.receiverCommitPromises]);
+    if (!this.destroyed && this.receiverDoneEvent === pending) {
+      this.maybeCompleteReceiverDone();
+    }
+  }
+
+  private maybeCompleteReceiverDone(): void {
+    const pending = this.receiverDoneEvent;
+    if (pending === undefined || this.receiverInFlightCommits > 0) {
+      if (pending !== undefined) {
+        this.armReceiverCommitWatchdog();
+      }
+      return;
+    }
+    this.finishReceiverDone(pending.event, pending.worker);
+  }
+
+  private armReceiverCommitWatchdog(): void {
+    if (this.receiverCommitWatchdogTimer !== undefined) {
+      globalThis.clearTimeout(this.receiverCommitWatchdogTimer);
+    }
+    this.receiverCommitWatchdogTimer = globalThis.setTimeout(() => {
+      this.receiverCommitWatchdogTimer = undefined;
+      if (this.receiverDoneEvent !== undefined && !this.destroyed) {
+        this.fail(
+          "The receiver sink stopped making progress while the transfer was finishing.",
+        );
+      }
+    }, SINK_PROGRESS_WATCHDOG_MS);
+  }
+
+  private clearReceiverCommitWatchdog(): void {
+    if (this.receiverCommitWatchdogTimer !== undefined) {
+      globalThis.clearTimeout(this.receiverCommitWatchdogTimer);
+      this.receiverCommitWatchdogTimer = undefined;
+    }
   }
 
   private requestNextSenderSlice(): void {
@@ -1127,15 +1226,40 @@ export class TransferController {
     }
   }
 
-  private resolveIfChannelsReady(): void {
-    if (
+  /** True when both peer channels are open right now. */
+  private channelsAreOpen(): boolean {
+    return (
       this.ctrlOpen &&
       this.dataOpen &&
       this.peer.ctrl?.readyState === "open" &&
       this.peer.data?.readyState === "open"
-    ) {
-      this.resolveChannels?.();
-      this.resolveChannels = undefined;
+    );
+  }
+
+  /**
+   * Resolves once both peer channels are open.
+   *
+   * WHY a method and not a stored promise: channel generations are replaced
+   * when a peer connects or reconnects, and a stored promise would strand
+   * callers already awaiting the previous one.
+   */
+  private waitForChannels(): Promise<void> {
+    if (this.channelsAreOpen()) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      this.channelWaiters.add(resolve);
+    });
+  }
+
+  private resolveIfChannelsReady(): void {
+    if (!this.channelsAreOpen()) {
+      return;
+    }
+    const waiters = [...this.channelWaiters];
+    this.channelWaiters.clear();
+    for (const resolve of waiters) {
+      resolve();
     }
   }
 
@@ -1149,9 +1273,6 @@ export class TransferController {
     this.currentData = data;
     this.ctrlOpen = ctrl?.readyState === "open";
     this.dataOpen = data?.readyState === "open";
-    this.channelsReady = new Promise((resolve) => {
-      this.resolveChannels = resolve;
-    });
   }
 
   private reportProgress(progress: TransferProgress): void {
@@ -1242,6 +1363,9 @@ export class TransferController {
     this.receiverStarted = false;
     this.receiverFinishRequested = false;
     this.receiverDoneMessage = undefined;
+    this.receiverDoneEvent = undefined;
+    this.receiverCommitPromises.clear();
+    this.clearReceiverCommitWatchdog();
     this.receiverManifest = undefined;
   }
 

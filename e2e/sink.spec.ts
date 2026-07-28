@@ -12,6 +12,7 @@ import {
   test,
 } from "@playwright/test";
 import { readOpfsSha256 } from "./inPageHash";
+import { startTransferFailureMonitor } from "./transferFailureMonitor";
 
 const HIGH_WATERMARK = 8 * 1024 * 1024;
 const MEMORY_LIMIT = 200 * 1024 * 1024;
@@ -37,44 +38,6 @@ const sha256File = (path: string): Promise<string> =>
 interface MemorySampler {
   stop: () => Promise<number[]>;
 }
-
-interface TransferFailureMonitor {
-  promise: Promise<never>;
-  stop: () => void;
-}
-
-const startTransferFailureMonitor = (page: Page): TransferFailureMonitor => {
-  let active = true;
-  let interval: ReturnType<typeof setInterval> | undefined;
-  let rejectFailure: (reason: Error) => void = () => undefined;
-  const promise = new Promise<never>((_, reject) => {
-    rejectFailure = reject;
-  });
-  const stop = (): void => {
-    active = false;
-    if (interval !== undefined) {
-      clearInterval(interval);
-    }
-  };
-  const check = async (): Promise<void> => {
-    if (!active) {
-      return;
-    }
-    try {
-      const log = await page.getByTestId("log").textContent({ timeout: 1_000 });
-      if (active && /fail|error|quota/i.test(log ?? "")) {
-        const error = new Error(`Transfer failed: ${log ?? ""}`);
-        stop();
-        rejectFailure(error);
-      }
-    } catch {
-      // The page can be closing after the transfer result is observed.
-    }
-  };
-  interval = setInterval(() => void check(), 500);
-  void check();
-  return { promise, stop };
-};
 
 const startMemorySampler = async (
   page: Page,

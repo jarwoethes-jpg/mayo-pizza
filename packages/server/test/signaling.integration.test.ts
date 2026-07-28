@@ -474,11 +474,20 @@ describe("localhost signaling server", () => {
           lockedDownloader.send(
             JSON.stringify({ t: "join", slug: lockedSlug, password: "wrong" }),
           );
-          expect(await errorPromise).toMatchObject({
-            t: "error",
-            code: "BAD_PASSWORD",
-            attemptsRemaining: 4 - attempt,
-          });
+          if (attempt < 4) {
+            expect(await errorPromise).toMatchObject({
+              t: "error",
+              code: "BAD_PASSWORD",
+              attemptsRemaining: 4 - attempt,
+            });
+          } else {
+            expect(await errorPromise).toEqual({
+              t: "error",
+              code: "ROOM_LOCKED",
+              message:
+                "That room is locked after too many failed password attempts.",
+            });
+          }
         }
 
         const verifiesBeforeLockedJoin = verify.mock.calls.length;
@@ -558,10 +567,20 @@ describe("localhost signaling server", () => {
       for (let attempt = 0; attempt < 5; attempt += 1) {
         const errorPromise = nextMessage(downloader);
         downloader.send(JSON.stringify({ t: "join", slug, password: "wrong" }));
-        expect(await errorPromise).toMatchObject({
-          t: "error",
-          code: "BAD_PASSWORD",
-        });
+        if (attempt < 4) {
+          expect(await errorPromise).toMatchObject({
+            t: "error",
+            code: "BAD_PASSWORD",
+            attemptsRemaining: 4 - attempt,
+          });
+        } else {
+          expect(await errorPromise).toEqual({
+            t: "error",
+            code: "ROOM_LOCKED",
+            message:
+              "That room is locked after too many failed password attempts.",
+          });
+        }
       }
 
       const uploaderClose = nextClose(uploader);

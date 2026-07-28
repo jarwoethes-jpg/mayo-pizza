@@ -335,12 +335,6 @@ test.describe("single-file transfer", () => {
       console.log(
         `[transfer:${browserName}] app ${(appBytesPerSec / (1024 * 1024)).toFixed(2)} MiB/s; baseline ${(baselineBytesPerSec / (1024 * 1024)).toFixed(2)} MiB/s`,
       );
-      // Threshold 0.65 approved by Mayo 2026-07-26: measured app/raw ratio is a
-      // stable 0.68-0.70 on the reference host (pipeline overhead ≈30%: double
-      // SHA-256, per-frame worker hops, two-page topology). A broken framing or
-      // backpressure implementation would land far below this band.
-      expect(appBytesPerSec).toBeGreaterThanOrEqual(baselineBytesPerSec * 0.65);
-
       const progress = await receiver.getByTestId("progress").textContent();
       const reportedBytesPerSec = Number(
         progress?.match(/· (\d+) B\/s/)?.[1] ?? 0,
@@ -364,6 +358,18 @@ test.describe("single-file transfer", () => {
           expect(Math.max(...samples) - samples[0]).toBeLessThan(MEMORY_LIMIT);
         }
       }
+
+      // Threshold 0.65 approved by Mayo 2026-07-26: measured app/raw ratio is a
+      // stable 0.68-0.70 on the reference host (pipeline overhead ≈30%: double
+      // SHA-256, per-frame worker hops, two-page topology). A broken framing or
+      // backpressure implementation would land far below this band.
+      // Firefox floor 0.30 approved by Mayo 2026-07-28: the measured app/raw
+      // ratio was 0.403-0.445-0.609 across three reference-host runs, and an A/B
+      // at 8aceae1 also produced 0.445. This is a long-standing mis-calibration
+      // of an unmeasured path, not a regression.
+      expect(appBytesPerSec).toBeGreaterThanOrEqual(
+        baselineBytesPerSec * (browserName === "firefox" ? 0.3 : 0.65),
+      );
     } finally {
       await contextA.close();
       await contextB.close();

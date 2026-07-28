@@ -146,6 +146,23 @@ test.describe("mayo.pizza UI gate", () => {
     await contrastAudit(page);
   });
 
+  test("has zero axe violations on the privacy and terms routes", async ({
+    page,
+    browserName,
+  }) => {
+    test.skip(
+      browserName !== "chromium",
+      "UI rendering gate is Chromium-only.",
+    );
+    await addBaseInitScript(page.context());
+    for (const route of ["/privacy", "/terms"]) {
+      await page.goto(route);
+      await expect(page.getByRole("heading")).toBeVisible();
+      await expectA11y(page, route);
+      await contrastAudit(page);
+    }
+  });
+
   test("has zero axe violations on the uploader staged view", async ({
     page,
     browserName,

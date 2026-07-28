@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BLOB_MAX_BYTES,
   consumeSwCredit,
@@ -10,11 +10,18 @@ import {
   detectSinkStrategy,
   isNextSwSequence,
   releaseSwCredit,
+  SINK_PROGRESS_WATCHDOG_MS,
   SINK_WRITE_TIMEOUT_MS,
   SinkManager,
+  SwStreamSink,
 } from "../src/sink";
 import type { ReceiverWorkerEvent } from "../src/worker/messages";
 import { ReceiverProcessor } from "../src/worker/receiverLogic";
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 describe("sink strategy detection", () => {
   it("prefers FSA, then service-worker streaming, then blob", () => {
@@ -127,6 +134,83 @@ describe("service-worker credit protocol", () => {
     expect(state.availableBytes).toBe(8);
     expect(isNextSwSequence(0, 0)).toBe(true);
     expect(isNextSwSequence(1, 0)).toBe(false);
+  });
+});
+
+interface SwSinkHarness {
+  sink: SwStreamSink;
+  sendMessage: (message: unknown) => void;
+}
+
+const createSwSinkHarness = async (): Promise<SwSinkHarness> => {
+  const listeners = new Map<string, (event: MessageEvent) => void>();
+  const active = { postMessage: vi.fn() };
+  const serviceWorker = {
+    addEventListener: (type: string, listener: (event: MessageEvent) => void) =>
+      listeners.set(type, listener),
+    removeEventListener: (type: string) => listeners.delete(type),
+    register: vi.fn(async () => ({ active })),
+  };
+  vi.stubGlobal("navigator", { serviceWorker });
+  vi.stubGlobal("window", {
+    clearInterval,
+    clearTimeout,
+    setInterval,
+    setTimeout,
+  });
+  vi.stubGlobal("document", {
+    body: { append: vi.fn() },
+    createElement: () => ({ remove: vi.fn() }),
+  });
+  const sink = new SwStreamSink("file.bin", 2);
+  const started = sink.start();
+  await vi.waitFor(() => expect(active.postMessage).toHaveBeenCalledOnce());
+  const firstCall = active.postMessage.mock.calls[0];
+  if (firstCall === undefined) {
+    throw new Error("The sink did not send its init message.");
+  }
+  const id = (firstCall[0] as { id: string }).id;
+  listeners.get("message")?.({
+    data: {
+      t: "ready",
+      id,
+      creditBytes: 8,
+    },
+  } as MessageEvent);
+  await started;
+  return {
+    sink,
+    sendMessage: (message) =>
+      listeners.get("message")?.({ data: { ...message, id } } as MessageEvent),
+  };
+};
+
+describe("service-worker close watchdog", () => {
+  it("allows commits that keep making progress", async () => {
+    vi.useFakeTimers();
+    const harness = await createSwSinkHarness();
+    const first = harness.sink.write(new Uint8Array([1]));
+    const second = harness.sink.write(new Uint8Array([2]));
+    const closed = harness.sink.close();
+
+    harness.sendMessage({ t: "credit", sequence: 0, bytes: 1 });
+    await expect(first).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(SINK_PROGRESS_WATCHDOG_MS - 1);
+    harness.sendMessage({ t: "credit", sequence: 1, bytes: 1 });
+    await expect(second).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(SINK_PROGRESS_WATCHDOG_MS - 1);
+    harness.sendMessage({ t: "closed" });
+    await expect(closed).resolves.toBeUndefined();
+  });
+
+  it("fails a silent close once the progress watchdog trips", async () => {
+    vi.useFakeTimers();
+    const harness = await createSwSinkHarness();
+    const closed = harness.sink.close();
+
+    const failure = expect(closed).rejects.toThrow(/stopped responding/i);
+    await vi.advanceTimersByTimeAsync(SINK_PROGRESS_WATCHDOG_MS);
+    await failure;
   });
 });
 

@@ -192,4 +192,48 @@ describe("peer rebuild coalescing", () => {
     expect(peer.connectionState.value).toBe("connecting");
     peer.close();
   });
+
+  it("makes a reaped room terminal without entering recovery", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
+
+    const listeners = new Map<string, Set<(payload: never) => void>>();
+    const signaling = {
+      isOpen: true,
+      on(event: string, listener: (payload: never) => void) {
+        const eventListeners = listeners.get(event) ?? new Set();
+        eventListeners.add(listener);
+        listeners.set(event, eventListeners);
+        return () => eventListeners.delete(listener);
+      },
+      requestIceConfig: async () => [],
+      sendSignal: async () => undefined,
+    } as unknown as SignalingClient;
+    const emit = (event: string, payload: never): void => {
+      for (const listener of listeners.get(event) ?? []) {
+        listener(payload);
+      }
+    };
+    const peer = createPeer("downloader", signaling);
+    const exhausted = vi.fn();
+    peer.on("exhausted", exhausted);
+    await peer.ready;
+
+    emit("error", {
+      t: "error",
+      code: "BAD_SLUG",
+      message: "That room has expired.",
+    } as never);
+    emit("close", {
+      code: 1001,
+      reason: "Room expired",
+      wasClean: false,
+    } as never);
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(exhausted).toHaveBeenCalledOnce();
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    peer.close();
+  });
 });

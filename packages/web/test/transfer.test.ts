@@ -123,6 +123,117 @@ describe("watermark frame pump", () => {
   });
 });
 
+const createChannelReadinessPeer = () => {
+  const sent: unknown[] = [];
+  const ctrlHandlers = new Map<string, (message: unknown) => void>();
+  const eventListeners = new Map<string, Set<() => void>>();
+
+  const makeCtrl = (readyState: "connecting" | "open") => ({
+    readyState,
+    send: (message: unknown) => sent.push(message),
+  });
+  const makeData = (readyState: "connecting" | "open") => ({
+    readyState,
+    bufferedAmount: 0,
+    send: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  });
+
+  const peer = {
+    ctrl: makeCtrl("connecting"),
+    data: makeData("connecting"),
+    maxMessageSize: undefined,
+    on: (event: string, listener: () => void) => {
+      const listeners = eventListeners.get(event) ?? new Set<() => void>();
+      listeners.add(listener);
+      eventListeners.set(event, listeners);
+      return () => listeners.delete(listener);
+    },
+    onCtrl: (type: string, handler: (message: unknown) => void) => {
+      ctrlHandlers.set(type, handler);
+      return () => ctrlHandlers.delete(type);
+    },
+  };
+
+  const emit = (event: string): void => {
+    for (const listener of eventListeners.get(event) ?? []) {
+      listener();
+    }
+  };
+
+  const openNewGeneration = (): void => {
+    peer.ctrl = makeCtrl("connecting");
+    peer.ctrl.readyState = "open";
+    emit("ctrl-open");
+    peer.data = makeData("connecting");
+    peer.data.readyState = "open";
+    emit("data-open");
+  };
+
+  return { ctrlHandlers, openNewGeneration, peer, sent };
+};
+
+describe("transfer channel readiness", () => {
+  it("sends a file manifest after a channel generation swap", async () => {
+    const { openNewGeneration, peer, sent } = createChannelReadinessPeer();
+    const controller = createTransferController("uploader", peer as never, {
+      senderWorkerFactory: () => ({
+        onmessage: null,
+        onerror: null,
+        postMessage: vi.fn(),
+        terminate: vi.fn(),
+      }),
+    });
+    void controller.startSend(new File(["payload"], "payload.txt"));
+
+    try {
+      openNewGeneration();
+      await vi.waitFor(() =>
+        expect(sent).toContainEqual(
+          expect.objectContaining({ t: "manifest", mode: "single" }),
+        ),
+      );
+    } finally {
+      controller.destroy();
+    }
+  });
+
+  it("sends a file manifest when channels are already open", async () => {
+    const { peer, sent } = createChannelReadinessPeer();
+    peer.ctrl.readyState = "open";
+    peer.data.readyState = "open";
+    const controller = createTransferController("uploader", peer as never);
+
+    await controller.startSend(new File(["payload"], "payload.txt"));
+
+    expect(sent).toContainEqual(
+      expect.objectContaining({ t: "manifest", mode: "single" }),
+    );
+    controller.destroy();
+  });
+
+  it("sends a folder manifest after a channel generation swap", async () => {
+    const { openNewGeneration, peer, sent } = createChannelReadinessPeer();
+    const controller = createTransferController("uploader", peer as never);
+    void controller.startFolderSend(
+      [{ path: "root/file.txt", file: new File(["payload"], "file.txt") }],
+      "root",
+    );
+
+    try {
+      openNewGeneration();
+      await vi.waitFor(() =>
+        expect(sent).toContainEqual(
+          expect.objectContaining({ t: "manifest", mode: "zip" }),
+        ),
+      );
+    } finally {
+      controller.destroy();
+    }
+  });
+});
+
 describe("transfer cancellation", () => {
   it("terminates the worker and removes channel handlers", async () => {
     const ctrlHandlers = new Map<string, (message: unknown) => void>();
@@ -338,6 +449,279 @@ describe("transfer cancellation", () => {
 
     expect(worker.postMessage).toHaveBeenCalledWith({ t: "finish" });
     expect(sent).not.toContainEqual(expect.objectContaining({ t: "error" }));
+    controller.destroy();
+  });
+
+  it("counts bytes when the sink detaches received chunk buffers", async () => {
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    let dataMessage: ((event: MessageEvent<unknown>) => void) | undefined;
+    const onError = vi.fn();
+    const onResult = vi.fn();
+    const worker = {
+      onmessage: null as ((event: MessageEvent<unknown>) => void) | null,
+      onerror: null as ((event: ErrorEvent) => void) | null,
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    };
+    const data = {
+      readyState: "open",
+      bufferedAmount: 0,
+      send: vi.fn(),
+      addEventListener: vi.fn((type: string, listener: unknown) => {
+        if (type === "message") {
+          dataMessage = listener as (event: MessageEvent<unknown>) => void;
+        }
+      }),
+      removeEventListener: vi.fn(),
+    };
+    const ctrl = {
+      readyState: "open",
+      send: vi.fn(),
+    };
+    const peer = {
+      ctrl,
+      data,
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    const controller = createTransferController("downloader", peer as never, {
+      onError,
+      onResult,
+      receiverWorkerFactory: () => worker,
+      sinkFactory: () => ({
+        strategy: "null" as const,
+        write: async (bytes: Uint8Array) => {
+          structuredClone(bytes.buffer, { transfer: [bytes.buffer] });
+        },
+        close: vi.fn(),
+        cancel: vi.fn(),
+      }),
+    });
+    const manifest = {
+      t: "manifest" as const,
+      transferId: "transfer-detached-chunk",
+      mode: "single" as const,
+      items: [{ path: "file.bin", size: 4, lastModified: 0 }],
+      totalBytes: 4,
+      suggestedName: "file.bin",
+    };
+
+    ctrlHandlers.get("manifest")?.(manifest);
+    controller.acceptTransfer();
+    await Promise.resolve();
+    ctrlHandlers.get("start")?.({
+      t: "start",
+      transferId: manifest.transferId,
+      offset: 0,
+    });
+    ctrlHandlers.get("done")?.({
+      t: "done",
+      transferId: manifest.transferId,
+      sha256: "hash",
+    });
+    dataMessage?.({ data: new ArrayBuffer(4) } as MessageEvent<unknown>);
+    worker.onmessage?.({
+      data: {
+        t: "chunk",
+        chunkId: "0",
+        buffer: new ArrayBuffer(4),
+        bytesDone: 4,
+        totalBytes: 4,
+      },
+    } as MessageEvent<unknown>);
+
+    await vi.waitFor(() =>
+      expect(worker.postMessage).toHaveBeenCalledWith({
+        t: "commit",
+        chunkId: "0",
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(worker.postMessage).toHaveBeenCalledWith({ t: "finish" }),
+    );
+    worker.onmessage?.({
+      data: { t: "done", bytesDone: 4, sha256: "hash" },
+    } as MessageEvent<unknown>);
+
+    await vi.waitFor(() => expect(onResult).toHaveBeenCalledOnce());
+    expect(onResult).toHaveBeenCalledWith(
+      expect.objectContaining({ verified: true }),
+    );
+    expect(onError).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining(
+          "The receiver worker finished before the sink was drained.",
+        ),
+      }),
+    );
+    controller.destroy();
+  });
+
+  it("waits for in-flight sink commits before accepting worker done", async () => {
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    let dataMessage: ((event: MessageEvent<unknown>) => void) | undefined;
+    let resolveWrite: (() => void) | undefined;
+    const onResult = vi.fn();
+    const worker = {
+      onmessage: null as ((event: MessageEvent<unknown>) => void) | null,
+      onerror: null as ((event: ErrorEvent) => void) | null,
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    };
+    const data = {
+      readyState: "open",
+      bufferedAmount: 0,
+      send: vi.fn(),
+      addEventListener: vi.fn((type: string, listener: unknown) => {
+        if (type === "message") {
+          dataMessage = listener as (event: MessageEvent<unknown>) => void;
+        }
+      }),
+      removeEventListener: vi.fn(),
+    };
+    const ctrl = {
+      readyState: "open",
+      send: vi.fn(),
+    };
+    const peer = {
+      ctrl,
+      data,
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    const controller = createTransferController("downloader", peer as never, {
+      onResult,
+      receiverWorkerFactory: () => worker,
+      sinkFactory: () => ({
+        strategy: "null" as const,
+        write: () =>
+          new Promise<void>((resolve) => {
+            resolveWrite = resolve;
+          }),
+        close: vi.fn(),
+        cancel: vi.fn(),
+      }),
+    });
+    const manifest = {
+      t: "manifest" as const,
+      transferId: "transfer-in-flight-commit",
+      mode: "single" as const,
+      items: [{ path: "file.bin", size: 4, lastModified: 0 }],
+      totalBytes: 4,
+      suggestedName: "file.bin",
+    };
+
+    ctrlHandlers.get("manifest")?.(manifest);
+    controller.acceptTransfer();
+    await Promise.resolve();
+    ctrlHandlers.get("start")?.({
+      t: "start",
+      transferId: manifest.transferId,
+      offset: 0,
+    });
+    ctrlHandlers.get("done")?.({
+      t: "done",
+      transferId: manifest.transferId,
+      sha256: "hash",
+    });
+    dataMessage?.({ data: new ArrayBuffer(4) } as MessageEvent<unknown>);
+    worker.onmessage?.({
+      data: {
+        t: "chunk",
+        chunkId: "0",
+        buffer: new ArrayBuffer(4),
+        bytesDone: 4,
+        totalBytes: 4,
+      },
+    } as MessageEvent<unknown>);
+    worker.onmessage?.({
+      data: { t: "done", bytesDone: 4, sha256: "hash" },
+    } as MessageEvent<unknown>);
+
+    expect(onResult).not.toHaveBeenCalled();
+    resolveWrite?.();
+    await vi.waitFor(() => expect(onResult).toHaveBeenCalledOnce());
+    expect(onResult).toHaveBeenCalledWith(
+      expect.objectContaining({ verified: true }),
+    );
+    controller.destroy();
+  });
+
+  it("fails when the sink remains genuinely short", async () => {
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    const onError = vi.fn();
+    const worker = {
+      onmessage: null as ((event: MessageEvent<unknown>) => void) | null,
+      onerror: null as ((event: ErrorEvent) => void) | null,
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    };
+    const peer = {
+      ctrl: { readyState: "open", send: vi.fn() },
+      data: {
+        readyState: "open",
+        bufferedAmount: 0,
+        send: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      },
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    const controller = createTransferController("downloader", peer as never, {
+      onError,
+      receiverWorkerFactory: () => worker,
+      sinkFactory: () => ({
+        strategy: "null" as const,
+        write: vi.fn(async () => undefined),
+        close: vi.fn(),
+        cancel: vi.fn(),
+      }),
+    });
+    const manifest = {
+      t: "manifest" as const,
+      transferId: "transfer-short-sink",
+      mode: "single" as const,
+      items: [{ path: "file.bin", size: 8, lastModified: 0 }],
+      totalBytes: 8,
+      suggestedName: "file.bin",
+    };
+
+    ctrlHandlers.get("manifest")?.(manifest);
+    controller.acceptTransfer();
+    await Promise.resolve();
+
+    const internals = controller as unknown as {
+      receiverFinishRequested: boolean;
+      receiverStarted: boolean;
+      receiverCommittedBytes: number;
+    };
+    internals.receiverFinishRequested = true;
+    internals.receiverStarted = true;
+    internals.receiverCommittedBytes = 4;
+    worker.onmessage?.({
+      data: { t: "done", bytesDone: 4, sha256: "short-hash" },
+    } as MessageEvent<unknown>);
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining(
+          "The receiver worker finished before the sink was drained.",
+        ),
+      }),
+    );
     controller.destroy();
   });
 

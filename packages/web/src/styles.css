@@ -390,6 +390,15 @@ input[type="checkbox"] {
   line-height: 1.45;
 }
 
+.password-prompt {
+  display: grid;
+  gap: 0.9rem;
+  border: 1px solid var(--mp-border);
+  border-radius: 1.5rem;
+  background: var(--mp-surface-raised);
+  padding: clamp(1rem, 3vw, 1.5rem);
+}
+
 .transfer-panel {
   display: grid;
   gap: 0.75rem;
@@ -500,6 +509,55 @@ input[type="checkbox"] {
   font-size: 0.75rem;
   line-height: 1.5;
   text-align: center;
+}
+
+.relay-note {
+  margin: 0;
+}
+
+.privacy-note a,
+.legal-footer a,
+.legal-copy a {
+  color: var(--mp-text);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.legal-links {
+  display: flex;
+  justify-content: center;
+  gap: 0.8rem;
+  margin-top: 0.6rem;
+}
+
+.legal-shell {
+  align-items: flex-start;
+}
+
+.legal-card {
+  width: min(100%, 48rem);
+}
+
+.legal-copy {
+  display: grid;
+  gap: 1rem;
+  line-height: 1.65;
+}
+
+.legal-copy p {
+  margin: 0;
+  color: var(--mp-muted);
+}
+
+.legal-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 2rem;
+  border-top: 1px solid var(--mp-border);
+  padding-top: 1rem;
 }
 
 .sr-only {

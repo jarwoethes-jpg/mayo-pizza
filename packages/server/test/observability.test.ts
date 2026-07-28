@@ -268,7 +268,9 @@ describe("observability endpoints", () => {
         });
         await waitForFrame(
           passwordDownloader,
-          (frame) => frame.t === "error" && frame.code === "BAD_PASSWORD",
+          (frame) =>
+            frame.t === "error" &&
+            frame.code === (attempt === 4 ? "ROOM_LOCKED" : "BAD_PASSWORD"),
         );
       }
       const afterPassword = await metrics();

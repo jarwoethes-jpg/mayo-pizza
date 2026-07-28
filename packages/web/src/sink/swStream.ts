@@ -1,4 +1,5 @@
 import type { Sink } from "./index";
+import { SINK_PROGRESS_WATCHDOG_MS } from "./watchdog";
 
 export const DOWNLOAD_SERVICE_WORKER = "/download.sw.js";
 export const DOWNLOAD_PATH_PREFIX = "/__mayo-dl/";
@@ -124,10 +125,12 @@ export class SwStreamSink implements Sink {
       this.nextCreditSequence += 1;
       releaseSwCredit(this.credit, message.bytes);
       pending.resolve();
+      this.armCloseWatchdog();
       this.flush();
       return;
     }
     if (message.t === "closed") {
+      this.clearCloseWatchdog();
       this.resolveClosed?.();
       this.resolveClosed = undefined;
       this.cleanup();
@@ -152,6 +155,7 @@ export class SwStreamSink implements Sink {
   private rejectReady: ((reason: unknown) => void) | undefined;
   private resolveClosed: (() => void) | undefined;
   private rejectClosed: ((reason: unknown) => void) | undefined;
+  private closeTimer: number | undefined;
 
   public constructor(name: string, totalBytes: number) {
     if (
@@ -250,6 +254,7 @@ export class SwStreamSink implements Sink {
     return new Promise<void>((resolve, reject) => {
       this.resolveClosed = resolve;
       this.rejectClosed = reject;
+      this.armCloseWatchdog();
       this.flush();
       this.maybeClose();
     });
@@ -324,6 +329,32 @@ export class SwStreamSink implements Sink {
     this.post({ t: "close", id: this.id });
   }
 
+  private armCloseWatchdog(): void {
+    if (this.resolveClosed === undefined) {
+      return;
+    }
+    if (this.closeTimer !== undefined) {
+      window.clearTimeout(this.closeTimer);
+    }
+    this.closeTimer = window.setTimeout(() => {
+      this.closeTimer = undefined;
+      if (this.resolveClosed !== undefined) {
+        this.fail(
+          new Error(
+            "The download service worker stopped responding while closing the download.",
+          ),
+        );
+      }
+    }, SINK_PROGRESS_WATCHDOG_MS);
+  }
+
+  private clearCloseWatchdog(): void {
+    if (this.closeTimer !== undefined) {
+      window.clearTimeout(this.closeTimer);
+      this.closeTimer = undefined;
+    }
+  }
+
   private post(message: SwPageMessage, transfer: Transferable[] = []): void {
     const registration = this.registrationPromise;
     void registration
@@ -355,6 +386,7 @@ export class SwStreamSink implements Sink {
     this.rejectClosed?.(error);
     this.resolveClosed = undefined;
     this.rejectClosed = undefined;
+    this.clearCloseWatchdog();
     this.cleanup();
   }
 
@@ -368,6 +400,7 @@ export class SwStreamSink implements Sink {
       window.clearInterval(this.pingTimer);
       this.pingTimer = undefined;
     }
+    this.clearCloseWatchdog();
     this.iframe?.remove();
     this.iframe = undefined;
   }

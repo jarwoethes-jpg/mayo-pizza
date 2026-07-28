@@ -13,6 +13,7 @@ import {
   type Page,
   test,
 } from "@playwright/test";
+import { startTransferFailureMonitor } from "./transferFailureMonitor";
 
 const execFile = promisify(execFileCallback);
 const signalingUrl = "ws://127.0.0.1:3100/ws";
@@ -404,17 +405,30 @@ test.describe("folder ZIP transfers", () => {
       const pair = await openPair(browser, contextB);
       contextA = pair.contextA;
       const downloadPromise = pair.receiver.waitForEvent("download");
-      await stageAndAccept(pair.sender, pair.receiver, mainTree, "4");
-      const download = await downloadPromise;
-      const downloadPath = await download.path();
-      if (downloadPath === null) {
-        throw new Error("Firefox did not provide a folder ZIP download path.");
+      const failureMonitor = startTransferFailureMonitor(pair.receiver);
+      try {
+        await stageAndAccept(pair.sender, pair.receiver, mainTree, "4");
+        const download = await Promise.race([
+          downloadPromise,
+          failureMonitor.promise,
+        ]);
+        const downloadPath = await download.path();
+        if (downloadPath === null) {
+          throw new Error(
+            "Firefox did not provide a folder ZIP download path.",
+          );
+        }
+        await Promise.race([
+          expect(pair.receiver.getByTestId("transfer-result")).toContainText(
+            "verified=true",
+            { timeout: 300_000 },
+          ),
+          failureMonitor.promise,
+        ]);
+        await runArchiveChecks(downloadPath, mainTree, "mayo-tree");
+      } finally {
+        failureMonitor.stop();
       }
-      await expect(pair.receiver.getByTestId("transfer-result")).toContainText(
-        "verified=true",
-        { timeout: 300_000 },
-      );
-      await runArchiveChecks(downloadPath, mainTree, "mayo-tree");
     } finally {
       await contextA?.close();
       await contextB.close();
