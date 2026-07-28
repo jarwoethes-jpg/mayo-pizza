@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { createReadStream, readFileSync } from "node:fs";
+import { createReadStream } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import {
   type Browser,
   type BrowserContext,
@@ -12,14 +12,19 @@ import {
   type Page,
   test,
 } from "@playwright/test";
+// @ts-expect-error -- plain-JS infra module shared with the Caddy generator; typed via JSDoc.
+import { buildHeaders } from "../infra/header-source.mjs";
 import { readOpfsSha256 } from "./inPageHash";
 
 const signalingUrl = "ws://127.0.0.1:3100/ws";
 
-const headersPath = resolve(process.cwd(), "infra/headers.json");
-const canonicalHeaders = JSON.parse(
-  readFileSync(headersPath, "utf8"),
-) as Record<string, string | null>;
+// Compare against the composed PREVIEW policy, not raw headers.json: production and preview
+// share one core string but differ in connect-src, and the anti-drift guarantee is that both
+// come from the same composer (see infra/header-source.mjs).
+const canonicalHeaders = buildHeaders("preview") as Record<
+  string,
+  string | null
+>;
 
 interface CSPViolation {
   violatedDirective: string;
@@ -216,7 +221,7 @@ const assertNoSecurityViolations = async (
 };
 
 test.describe("Content Security Policy and HTTP security headers", () => {
-  test("serves Content-Security-Policy header byte-identical to canonical infra/headers.json", async ({
+  test("serves a Content-Security-Policy byte-identical to the composed preview policy", async ({
     page,
   }) => {
     const response = await page.goto("/");

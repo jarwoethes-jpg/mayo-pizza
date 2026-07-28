@@ -1,22 +1,17 @@
-import { readFileSync } from "node:fs";
 import { fileURLToPath, URL } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+// @ts-expect-error -- plain-JS infra module shared with the Caddy generator; typed via JSDoc.
+import { buildHeaders, toPreviewHeaders } from "../../infra/header-source.mjs";
 
-type HeaderSource = Record<string, string | null>;
-
-const headersPath = fileURLToPath(
-  new URL("../../infra/headers.json", import.meta.url),
-);
-const headerSource = JSON.parse(
-  readFileSync(headersPath, "utf8"),
-) as HeaderSource;
-const previewHeaders = Object.fromEntries(
-  Object.entries(headerSource).filter(
-    (entry): entry is [string, string] => typeof entry[1] === "string",
-  ),
-) as Record<string, string>;
+// WHY compose here rather than read headers.json directly: the preview policy must come from
+// the same core string and the same composer as the deployed Caddy snippet, so the CSP the
+// e2e suite exercises cannot silently diverge from the one production serves.
+const previewHeaders = toPreviewHeaders(buildHeaders("preview")) as Record<
+  string,
+  string
+>;
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],

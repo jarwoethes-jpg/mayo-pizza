@@ -359,17 +359,21 @@ test.describe("single-file transfer", () => {
         }
       }
 
-      // Threshold 0.65 approved by Mayo 2026-07-26: measured app/raw ratio is a
-      // stable 0.68-0.70 on the reference host (pipeline overhead ≈30%: double
-      // SHA-256, per-frame worker hops, two-page topology). A broken framing or
-      // backpressure implementation would land far below this band.
-      // Firefox floor 0.30 approved by Mayo 2026-07-28: the measured app/raw
-      // ratio was 0.403-0.445-0.609 across three reference-host runs, and an A/B
-      // at 8aceae1 also produced 0.445. This is a long-standing mis-calibration
-      // of an unmeasured path, not a regression.
-      expect(appBytesPerSec).toBeGreaterThanOrEqual(
-        baselineBytesPerSec * (browserName === "firefox" ? 0.3 : 0.65),
-      );
+      // Absolute floor approved by Mayo 2026-07-28, replacing the app/raw ratio.
+      //
+      // WHY the ratio was abandoned: the app is CPU-bound (double SHA-256, per-frame worker
+      // hops, two-page topology) while the raw baseline is channel-bound, so a FASTER host
+      // lowers the ratio. On 2026-07-28 the same commit scored 0.805 on a loaded host and
+      // 0.574 on a quiet one, where the baseline had doubled to 21 MiB/s but the app gained
+      // only 46%. The ratio had already been recalibrated once for Firefox (0.30) for the
+      // same reason. It punishes good hardware instead of catching regressions.
+      //
+      // The floors sit ~30% under the slowest app throughput ever measured on this host
+      // (chromium 8.36 MiB/s, firefox 4.87 MiB/s). Broken framing or absent backpressure
+      // lands an order of magnitude below this, which is what the gate exists to catch.
+      // The raw baseline is still measured and logged above as a diagnostic.
+      const throughputFloor = (browserName === "firefox" ? 3 : 6) * 1024 * 1024;
+      expect(appBytesPerSec).toBeGreaterThanOrEqual(throughputFloor);
     } finally {
       await contextA.close();
       await contextB.close();
