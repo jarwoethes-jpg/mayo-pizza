@@ -31,12 +31,17 @@ describe("TURN credentials", () => {
       {
         urls: [
           "turn:mayo.pizza:3478?transport=udp",
-          "turns:mayo.pizza:5349?transport=tcp",
+          "turn:mayo.pizza:3478?transport=tcp",
         ],
         username: "1700003600:peer-123",
         credential: expect.any(String),
       },
     ]);
+
+    const emittedUrls = iceServers.flatMap(({ urls }) =>
+      typeof urls === "string" ? [urls] : urls,
+    );
+    expect(emittedUrls.filter((url) => url.startsWith("turns:"))).toEqual([]);
   });
 });
 

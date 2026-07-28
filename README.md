@@ -71,7 +71,6 @@ The defaults below are the effective compose defaults unless marked as a standal
 | `TURN_HOST` | `mayo.pizza` | No | Relay candidates can target the wrong TURN host. |
 | `STUN_PORT` | `3478` | No | ICE discovery can target the wrong port. |
 | `TURN_PORT` | `3478` | No | UDP TURN relay fallback can fail. |
-| `TURNS_PORT` | `5349` | No | TLS/TCP TURN fallback can fail. |
 | `TRUSTED_PROXIES` | `172.30.0.2` in compose; `127.0.0.1,::1` standalone | No | A wrong value either collapses all clients to Caddy's IP for rate limiting or permits spoofed forwarded addresses. |
 | `TURN_STATIC_SECRET` | None | Yes in compose | App-minted TURN credentials and coturn will not agree; compose refuses to interpolate without it. |
 | `RATE_LIMIT_CREATE` | `10` per hour/IP | No | Invalid values fall back to 10; a valid value that is too low throttles room creation, while a high value weakens abuse protection. |
@@ -90,7 +89,7 @@ Before first boot:
 
 - Create DNS A and/or AAAA records for `mayo.pizza` pointing to the host.
 - If Cloudflare fronts the name, use DNS-only / the grey cloud. Caddy's ACME HTTP challenge must reach the host directly, and WebRTC/TURN traffic must not be sent through Cloudflare's HTTP proxy.
-- Make ports 80 and 443 reachable by Caddy, and expose the TURN listener and relay range required by `infra/docker-compose.yml` (3478, 5349, and UDP 49160–49200).
+- Make ports 80 and 443 reachable by Caddy, and expose the TURN listener and relay range required by `infra/docker-compose.yml` (TCP/UDP 3478 and UDP 49160–49200).
 - Set `TURN_STATIC_SECRET` and `METRICS_TOKEN` as Portainer stack environment values. Keep both out of git. Change the hostname/ICE values only when the DNS and firewall plan also changes.
 
 Validate interpolation before deploying:
@@ -158,7 +157,7 @@ Scrape coturn locally and alert on the month-to-date delta of `turn_total_traffi
 
 On a fresh server with no traffic, the endpoint emits all 26 `# HELP`/`# TYPE` declarations but sample values for only the 6 `process_*` metrics. Every `turn_*` and `stun_*` series is absent until a session produces data. Alert rules must distinguish no data from zero and tolerate an absent series, for example with an `or vector(0)` fallback, rather than treating absence as a healthy zero.
 
-Host firewall byte counters remain the only way to see live in-flight relay traffic given that lag. Inspect and poll counters for TCP/UDP 3478, TCP/UDP 5349, and UDP relay ports 49160–49200, then alert on the measured byte-rate or cost budget. Prometheus metrics and host firewall accounting are complementary methods.
+Host firewall byte counters remain the only way to see live in-flight relay traffic given that lag. Inspect and poll counters for TCP/UDP 3478 and UDP relay ports 49160–49200, then alert on the measured byte-rate or cost budget. Prometheus metrics and host firewall accounting are complementary methods.
 
 The checked-in `turnserver.conf` uses `total-quota=100` and deliberately sets no bandwidth rate cap: a rate cap does not bound monthly volume, so alerting is the control. Do not add `bps-capacity` on its own; coturn requires `max-bps` alongside it and refuses to start otherwise. The option names and Prometheus options used here are verified against the pinned `coturn/coturn:4.6.2` image.
 
