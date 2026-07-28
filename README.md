@@ -140,15 +140,11 @@ The privacy guarantee is that app logs do not contain room slugs, uploader token
 
 ## Metrics and uptime
 
-Use `/healthz` for uptime checks. The edge returns 404 for `/metrics`, so a public Caddy request cannot expose metrics. An internal scraper on the Docker network may request `http://app:3000/metrics` with `Authorization: Bearer $METRICS_TOKEN`; keep the bearer token secret. If remote scraping is required, remove the edge block only after retaining bearer authentication and adding an explicit network access policy.
+Use `/healthz` for uptime checks. The edge returns 404 for `/metrics`, so a public Caddy request cannot expose metrics. That edge block covers the app's `/metrics` only; coturn's Prometheus endpoint is a separate network surface on host port 9641 that Caddy does not front and therefore does not protect. An internal scraper on the Docker network may request `http://app:3000/metrics` with `Authorization: Bearer $METRICS_TOKEN`; keep the bearer token secret. If remote scraping is required, remove the edge block only after retaining bearer authentication and adding an explicit network access policy.
 
-For coturn bandwidth alerting, check the actual image before configuring a scraper:
+Coturn 4.6.2 supports Prometheus. The `prometheus` key now enabled in `infra/turnserver.conf` enables the listener on the default port 9641. Scrape `http://127.0.0.1:9641/metrics`; `http://127.0.0.1:9641/` is a health check on the same port.
 
-```bash
-docker compose -f infra/docker-compose.yml exec coturn turnserver -h | grep -i prometheus
-```
-
-If that prints a supported Prometheus option or endpoint, follow that image's help output to enable it and scrape the resulting endpoint. If it prints nothing, use host/network accounting instead: coturn uses `network_mode: host`, so inspect the host firewall's byte counters for TCP/UDP 3478, TCP/UDP 5349, and UDP relay ports 49160–49200, then poll the counters and alert on the measured byte-rate/cost budget. Verify the available accounting stack first:
+Because coturn uses `network_mode: host` and its Prometheus listener has no bind-address option, port 9641 is exposed on every host interface. Before putting the VPS on the public internet, restrict port 9641 with the host firewall to localhost or the scraper's address. Verify the available accounting stack first:
 
 ```bash
 sudo nft --version
@@ -156,9 +152,15 @@ sudo nft -j list ruleset
 sudo iptables -L -v -n -x
 ```
 
-Use the active firewall stack's existing TURN allow chain and persist counter-only rules; do not add an unreviewed broad `ACCEPT` rule. The exact firewall rule/persistence command is host-specific and must be verified on the host.
+Use the active firewall stack's existing TURN allow chain. Add only a narrowly scoped rule for port 9641 that permits localhost or the scraper's address, and persist it; for accounting, persist counter-only rules as needed. Do not add an unreviewed broad `ACCEPT` rule. The exact firewall rule/persistence command is host-specific and must be verified on the host.
 
-The checked-in `turnserver.conf` uses `total-quota=100` and `bps-capacity=10485760` (10 MiB/s). These option names were verified against coturn 4.6.1 on the development host; verify the pinned `coturn/coturn:4.6.2` image with `turnserver -h` before deployment.
+Scrape coturn locally and alert on the month-to-date delta of `turn_total_traffic_sentb` plus `turn_total_traffic_rcvb` against the monthly byte budget. These counters describe bytes from finished sessions, so bytes from a still-open relay session are not counted until that session ends. A single transfer can hold an allocation for many minutes; a byte-rate alert built on these counters therefore lags behind live traffic and is not real-time. `turn_total_allocations` is a gauge of current allocations despite its name, not a cumulative total; compare it with the checked-in `total-quota=100` to alert on saturation.
+
+On a fresh server with no traffic, the endpoint emits all 26 `# HELP`/`# TYPE` declarations but sample values for only the 6 `process_*` metrics. Every `turn_*` and `stun_*` series is absent until a session produces data. Alert rules must distinguish no data from zero and tolerate an absent series, for example with an `or vector(0)` fallback, rather than treating absence as a healthy zero.
+
+Host firewall byte counters remain the only way to see live in-flight relay traffic given that lag. Inspect and poll counters for TCP/UDP 3478, TCP/UDP 5349, and UDP relay ports 49160–49200, then alert on the measured byte-rate or cost budget. Prometheus metrics and host firewall accounting are complementary methods.
+
+The checked-in `turnserver.conf` uses `total-quota=100` and deliberately sets no bandwidth rate cap: a rate cap does not bound monthly volume, so alerting is the control. Do not add `bps-capacity` on its own; coturn requires `max-bps` alongside it and refuses to start otherwise. The option names and Prometheus options used here are verified against the pinned `coturn/coturn:4.6.2` image.
 
 ## Rollback
 
