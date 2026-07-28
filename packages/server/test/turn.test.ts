@@ -1,4 +1,6 @@
 import { createHmac } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath, URL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   createIceServers,
@@ -35,5 +37,20 @@ describe("TURN credentials", () => {
         credential: expect.any(String),
       },
     ]);
+  });
+});
+
+describe("TURN server configuration", () => {
+  // WHY: coturn does not expand env vars in its config and treats config and CLI
+  // static-auth-secret values as independently valid, so a literal placeholder
+  // here is a publicly-known working credential.
+  it("contains no unexpanded environment-variable placeholders", () => {
+    const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
+    const config = readFileSync(
+      `${repositoryRoot}/infra/turnserver.conf`,
+      "utf8",
+    );
+
+    expect(config).not.toMatch(/\$\{[^}]+\}/);
   });
 });
