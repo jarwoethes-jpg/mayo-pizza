@@ -1,7 +1,7 @@
 import { LegalPage } from "./legal";
 
-/** Placeholder for Mayo’s abuse-reporting address. */
-export const ABUSE_CONTACT = "[Mayo: add abuse contact address]";
+/** Mayo’s published abuse-reporting address. */
+export const ABUSE_CONTACT = "abuse@mayo.pizza";
 
 /** The short terms statements rendered on the terms route. */
 export const TERMS_COPY = [

@@ -55,6 +55,6 @@ describe("password room UX helpers", () => {
     expect(terms).toMatch(/lawful|illegal/i);
     expect(terms).toMatch(/relay/i);
     expect(terms).toMatch(/as-is/i);
-    expect(ABUSE_CONTACT).toMatch(/^\[Mayo:/);
+    expect(ABUSE_CONTACT).toMatch(/^[^\s@]+@[^\s@]+\.[^\s@]+$/);
   });
 });

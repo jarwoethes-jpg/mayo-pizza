@@ -342,7 +342,9 @@ test.describe("streaming download sinks", () => {
       await expect(second.receiver.getByTestId("log")).toContainText(
         /too large/i,
       );
-      await expect(second.receiver.getByTestId("sink-strategy")).toBeVisible();
+      await expect(second.receiver.getByTestId("sink-strategy")).toHaveText(
+        "blob",
+      );
     } finally {
       await second.contextA.close();
       await second.contextB.close();

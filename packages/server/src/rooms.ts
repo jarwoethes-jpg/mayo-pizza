@@ -211,6 +211,7 @@ export interface RoomRegistry {
 export interface RoomRegistryOptions {
   now?: () => number;
   ttlMs?: number;
+  intervalMs?: number;
   startReaper?: boolean;
   onRoomReaped?: RoomReapedHandler;
 }
@@ -227,7 +228,7 @@ export const createRoomRegistry = (
       ? undefined
       : setInterval(() => {
           reapIdleRooms(registry, now());
-        }, ROOM_REAPER_INTERVAL_MS);
+        }, options.intervalMs ?? ROOM_REAPER_INTERVAL_MS);
 
   timer?.unref();
 
