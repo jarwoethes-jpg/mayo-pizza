@@ -5,6 +5,7 @@
   "scripts": {
     "check": "biome check . && pnpm --filter shared exec tsc --noEmit && pnpm --filter server exec tsc --noEmit && pnpm --filter web exec tsc --noEmit",
     "test": "pnpm --filter shared test && pnpm --filter server test && pnpm --filter web test",
+    "generate:headers": "node infra/generate-headers.mjs",
     "e2e": "playwright test -c playwright.config.ts",
     "test:e2e": "pnpm e2e"
   },

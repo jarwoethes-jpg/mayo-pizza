@@ -1,4 +1,12 @@
 mayo.pizza {
-  encode zstd gzip
-  reverse_proxy app:3000
+	encode zstd gzip
+	import security-headers.caddy
+
+	handle /metrics {
+		respond 404
+	}
+
+	handle {
+		reverse_proxy app:3000
+	}
 }

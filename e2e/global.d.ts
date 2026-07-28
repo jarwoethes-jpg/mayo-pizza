@@ -14,4 +14,9 @@ interface Window {
   };
   __MAYO_E2E__?: boolean;
   __MAYO_DEBUG_DROP__?: () => void;
+  __cspViolations?: {
+    violatedDirective: string;
+    blockedURI: string;
+    sourceFile: string;
+  }[];
 }

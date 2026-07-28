@@ -17,8 +17,25 @@ services:
       STUN_PORT: ${STUN_PORT:-3478}
       TURN_PORT: ${TURN_PORT:-3478}
       TURNS_PORT: ${TURNS_PORT:-5349}
-      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1,::1}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.30.0.2}
       TURN_STATIC_SECRET: ${TURN_STATIC_SECRET:?TURN_STATIC_SECRET must be set}
+      RATE_LIMIT_CREATE: ${RATE_LIMIT_CREATE:-10}
+      RATE_LIMIT_JOIN: ${RATE_LIMIT_JOIN:-60}
+      RATE_LIMIT_MESSAGE: ${RATE_LIMIT_MESSAGE:-100}
+      ROOM_TTL_MS: ${ROOM_TTL_MS:-1800000}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN must be set}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/healthz"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "7"
     restart: unless-stopped
 
   caddy:
@@ -30,8 +47,12 @@ services:
       - caddy_data:/data
       - caddy_config:/config
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./security-headers.caddy:/etc/caddy/security-headers.caddy:ro
     depends_on:
       - app
+    networks:
+      default:
+        ipv4_address: 172.30.0.2
     restart: unless-stopped
 
   coturn:
@@ -51,3 +72,9 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

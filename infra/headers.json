@@ -1,0 +1,11 @@
+{
+  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "no-referrer",
+  "X-Frame-Options": "DENY",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+  "X-Robots-Tag": "noindex, nofollow",
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Server": null,
+  "Content-Security-Policy": "default-src 'self'; script-src 'self'; worker-src 'self'; connect-src 'self' ws://127.0.0.1:3100 wss://mayo.pizza; img-src 'self' data: blob:; font-src 'self'; style-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+}
