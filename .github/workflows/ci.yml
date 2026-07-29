@@ -21,6 +21,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Check
         run: pnpm check
+      - name: Build web
+        run: pnpm --filter web build
       - name: Test
         run: pnpm test
 

@@ -226,7 +226,7 @@ describe("localhost signaling server", () => {
     }
   });
 
-  it.skipIf(!existsSync(staticIndex))(
+  it.skipIf(!existsSync(staticIndex) && !process.env.CI)(
     "serves the built web index",
     async () => {
       const response = await fetch(`http://127.0.0.1:${port}/`);

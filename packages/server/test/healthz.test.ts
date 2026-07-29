@@ -20,7 +20,7 @@ describe("GET /healthz", () => {
     expect(response.json()).toEqual({ ok: true });
   });
 
-  it.skipIf(!existsSync(staticIndex))(
+  it.skipIf(!existsSync(staticIndex) && !process.env.CI)(
     "serves the built web index",
     async () => {
       const response = await app.inject({ method: "GET", url: "/" });
