@@ -49,23 +49,54 @@
 }
 
 :root {
-  /* Brand colors are centralized here so components can never drift from the guide. */
-  --mp-cream: #fdfcf0;
-  --mp-olive: #3d4821;
-  --mp-gold: #f8a04d;
-  --mp-red: #e31c2c;
-  --mp-purple: #8f54f9;
-  --mp-surface: var(--mp-cream);
-  --mp-surface-raised: var(--mp-cream);
-  --mp-text: var(--mp-olive);
-  --mp-on-strong: var(--mp-cream);
-  --mp-card: var(--mp-cream);
-  --mp-border: color-mix(in srgb, var(--mp-olive) 18%, transparent);
-  --mp-muted: color-mix(in srgb, var(--mp-olive) 78%, transparent);
-  --mp-gold-wash: color-mix(in srgb, var(--mp-gold) 24%, var(--mp-cream));
-  --mp-focus: var(--mp-olive);
-  --mp-shadow-clay: 0 18px 44px
-    color-mix(in srgb, var(--mp-olive) 14%, transparent);
+  /* Single theme. "Oven char" is a dark palette with no light counterpart: a
+     light variant cannot be derived from these three hues without inventing
+     stops, so declaring color-scheme keeps native controls and scrollbars in
+     step instead of rendering light chrome against a near-black page. */
+  color-scheme: dark;
+
+  /* The eight source values. Everything below is a derivation of these, so a
+     future re-skin only has to touch this block. */
+  --mp-bg: #1a1614;
+  --mp-surface: #252017;
+  --mp-accent: #e07a45;
+  --mp-accent-2: #f2b24c;
+  --mp-text: #f5efe6;
+  --mp-text-dim: #b0a697;
+  --mp-mono: #c9bfae;
+
+  --mp-card: var(--mp-surface);
+
+  /* Two border strengths, and the split is load-bearing. --mp-surface is only
+     1.11:1 against --mp-bg, so the hairline — not the surface step — is what
+     actually separates the card. 0.10 is decorative; wherever a border is the
+     sole affordance identifying a control it has to clear 3:1, which needs
+     0.36 (measured 3.07 over --mp-bg, 3.06 over --mp-surface). */
+  --mp-border: rgba(245, 239, 230, 0.1);
+  --mp-border-control: rgba(245, 239, 230, 0.36);
+
+  /* Filled accents take a dark label: --mp-text on --mp-accent is 2.61:1 and
+     fails AA outright, while --mp-bg on --mp-accent is 6.02:1. */
+  --mp-on-accent: var(--mp-bg);
+  --mp-accent-hover: #e38246;
+  --mp-accent-active: #cc7040;
+
+  --mp-wash-accent: rgba(224, 122, 69, 0.1);
+  --mp-wash-subtle: rgba(245, 239, 230, 0.06);
+  --mp-track: rgba(245, 239, 230, 0.36);
+  --mp-tint-success: rgba(242, 178, 76, 0.12);
+  --mp-tint-error: rgba(224, 122, 69, 0.12);
+
+  /* Honey clears 3:1 against both surfaces (9.62 on bg, 8.67 on surface), so
+     one ring colour works everywhere. */
+  --mp-focus: var(--mp-accent-2);
+
+  /* A QR code needs a light plate to stay scannable. This is the palette's
+     lightest value (--mp-text), not a new hue — but it is written as a literal
+     hex on purpose: main.tsx reads it with getPropertyValue() to colour the QR,
+     and a literal avoids depending on when the engine substitutes var(). */
+  --mp-qr-plate: #f5efe6;
+
   --mp-font-display: "Poiret One", serif;
   --mp-font-body: "Rubik", system-ui, sans-serif;
   --mp-font-mono: ui-monospace, "SF Mono", monospace;
@@ -73,19 +104,4 @@
   --mp-radius-pill: 999px;
   --mp-motion-fast: 180ms ease-out;
   --mp-motion-view: 300ms ease-out;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --mp-surface: var(--mp-olive);
-    --mp-surface-raised: var(--mp-olive);
-    --mp-text: var(--mp-cream);
-    --mp-on-strong: var(--mp-cream);
-    --mp-card: color-mix(in srgb, var(--mp-olive) 88%, var(--mp-cream));
-    --mp-border: color-mix(in srgb, var(--mp-cream) 24%, transparent);
-    --mp-muted: color-mix(in srgb, var(--mp-cream) 72%, transparent);
-    --mp-gold-wash: color-mix(in srgb, var(--mp-gold) 20%, var(--mp-olive));
-    --mp-focus: var(--mp-cream);
-    --mp-shadow-clay: 0 18px 44px color-mix(in srgb, black 25%, transparent);
-  }
 }

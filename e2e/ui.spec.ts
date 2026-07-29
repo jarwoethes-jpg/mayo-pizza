@@ -49,6 +49,17 @@ const expectA11y = async (page: Page, state: string): Promise<void> => {
   expect(results.violations, `${state} has axe violations`).toEqual([]);
 };
 
+// Guards the one hazard the "Oven char" palette introduces. Filled accent
+// buttons carry a near-black label (--mp-on-accent) because light text on
+// terracotta measures only 2.61:1 and fails AA. That makes the same dark value
+// invisible anywhere it appears WITHOUT a fill of its own, so this flags any
+// element painted --mp-on-accent whose background is fully transparent — i.e.
+// dark text inheriting a dark surface.
+//
+// The previous gold/purple arms are gone with those tokens. Retargeting them
+// verbatim would have been actively harmful: --mp-purple no longer resolves, so
+// getPropertyValue returns "" and the probe would inherit an arbitrary colour,
+// matching unrelated elements and failing at random.
 const contrastAudit = async (page: Page): Promise<void> => {
   const violations = await page.evaluate(() => {
     const root = getComputedStyle(document.documentElement);
@@ -60,18 +71,19 @@ const contrastAudit = async (page: Page): Promise<void> => {
       probe.remove();
       return resolved;
     };
-    const gold = resolveColor(root.getPropertyValue("--mp-gold"));
-    const purple = resolveColor(root.getPropertyValue("--mp-purple"));
+    const onAccent = resolveColor(root.getPropertyValue("--mp-on-accent"));
     const found: string[] = [];
     for (const element of Array.from(
       document.querySelectorAll<HTMLElement>("*"),
     )) {
       const styles = getComputedStyle(element);
-      if (styles.color === gold) {
-        found.push(`gold text: ${element.tagName.toLowerCase()}`);
-      }
-      if (styles.color === purple && Number.parseFloat(styles.fontSize) < 24) {
-        found.push(`small purple text: ${element.tagName.toLowerCase()}`);
+      if (
+        styles.color === onAccent &&
+        styles.backgroundColor === "rgba(0, 0, 0, 0)"
+      ) {
+        found.push(
+          `dark label with no accent fill behind it: ${element.tagName.toLowerCase()}`,
+        );
       }
     }
     return found;
@@ -311,53 +323,52 @@ test.describe("mayo.pizza UI gate", () => {
       "UI rendering gate is Chromium-only.",
     );
     await addBaseInitScript(page.context());
-    const widths = [320, 768, 1440, 2560];
-    const schemes = ["light", "dark"] as const;
-    for (const scheme of schemes) {
-      await page.emulateMedia({ colorScheme: scheme });
-      for (const width of widths) {
-        await page.setViewportSize({ width, height: 900 });
-        await page.goto("/");
-        await expect(
-          page.getByRole("heading", { name: "Send a slice" }),
-        ).toBeVisible();
-        await expect
-          .poll(() =>
-            page.evaluate(
-              () => document.documentElement.scrollWidth <= window.innerWidth,
-            ),
-          )
-          .toBe(true);
-        await page.screenshot({
-          path: join(
-            testInfo.project.outputDir,
-            "ui-matrix",
-            `idle-${scheme}-${width}.png`,
+    // One pass, not two: the app has a single theme now, so looping colour
+    // schemes produced byte-identical screenshots. 360 is the brief's stated
+    // responsive floor; 320 is kept because it is stricter still.
+    const widths = [320, 360, 768, 1440, 2560];
+    for (const width of widths) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/");
+      await expect(
+        page.getByRole("heading", { name: "Send a slice" }),
+      ).toBeVisible();
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () => document.documentElement.scrollWidth <= window.innerWidth,
           ),
-          fullPage: true,
-        });
-        await page.getByTestId("file-input").setInputFiles(smallFile);
-        await expect(page.locator(".staged-card")).toBeVisible();
-        await expect
-          .poll(() =>
-            page.evaluate(
-              () => document.documentElement.scrollWidth <= window.innerWidth,
-            ),
-          )
-          .toBe(true);
-        await page.screenshot({
-          path: join(
-            testInfo.project.outputDir,
-            "ui-matrix",
-            `staged-${scheme}-${width}.png`,
+        )
+        .toBe(true);
+      await page.screenshot({
+        path: join(
+          testInfo.project.outputDir,
+          "ui-matrix",
+          `idle-${width}.png`,
+        ),
+        fullPage: true,
+      });
+      await page.getByTestId("file-input").setInputFiles(smallFile);
+      await expect(page.locator(".staged-card")).toBeVisible();
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () => document.documentElement.scrollWidth <= window.innerWidth,
           ),
-          fullPage: true,
-        });
-      }
+        )
+        .toBe(true);
+      await page.screenshot({
+        path: join(
+          testInfo.project.outputDir,
+          "ui-matrix",
+          `staged-${width}.png`,
+        ),
+        fullPage: true,
+      });
     }
   });
 
-  test("uses the olive surface and cream text in dark mode", async ({
+  test("renders the one dark theme whatever colour scheme is reported", async ({
     page,
     browserName,
   }) => {
@@ -366,32 +377,36 @@ test.describe("mayo.pizza UI gate", () => {
       "UI rendering gate is Chromium-only.",
     );
     await addBaseInitScript(page.context());
-    await page.emulateMedia({ colorScheme: "dark" });
-    await page.goto("/");
-    const colors = await page.evaluate(() => {
-      const root = getComputedStyle(document.documentElement);
-      const resolveColor = (
-        value: string,
-        property: "backgroundColor" | "color",
-      ): string => {
-        const probe = document.createElement("span");
-        probe.style[property] = value;
-        document.body.append(probe);
-        const resolved = getComputedStyle(probe)[property];
-        probe.remove();
-        return resolved;
-      };
-      return {
-        bodyBackground: getComputedStyle(document.body).backgroundColor,
-        bodyText: getComputedStyle(document.body).color,
-        olive: resolveColor(
-          root.getPropertyValue("--mp-olive"),
-          "backgroundColor",
-        ),
-        cream: resolveColor(root.getPropertyValue("--mp-cream"), "color"),
-      };
-    });
-    expect(colors.bodyBackground).toBe(colors.olive);
-    expect(colors.bodyText).toBe(colors.cream);
+    // "Oven char" has no light counterpart, so BOTH emulations must resolve to
+    // the same tokens. Asserting both is what proves the theme genuinely
+    // collapsed, rather than a light branch surviving somewhere unstyled.
+    for (const scheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.goto("/");
+      const colors = await page.evaluate(() => {
+        const root = getComputedStyle(document.documentElement);
+        const resolveColor = (
+          value: string,
+          property: "backgroundColor" | "color",
+        ): string => {
+          const probe = document.createElement("span");
+          probe.style[property] = value;
+          document.body.append(probe);
+          const resolved = getComputedStyle(probe)[property];
+          probe.remove();
+          return resolved;
+        };
+        return {
+          bodyBackground: getComputedStyle(document.body).backgroundColor,
+          bodyText: getComputedStyle(document.body).color,
+          bg: resolveColor(root.getPropertyValue("--mp-bg"), "backgroundColor"),
+          text: resolveColor(root.getPropertyValue("--mp-text"), "color"),
+        };
+      });
+      expect(colors.bodyBackground, `${scheme}: body background`).toBe(
+        colors.bg,
+      );
+      expect(colors.bodyText, `${scheme}: body text`).toBe(colors.text);
+    }
   });
 });

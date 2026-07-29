@@ -2,23 +2,30 @@
 @import "./theme/tokens.css";
 
 @theme inline {
-  --color-mp-cream: var(--mp-cream);
-  --color-mp-olive: var(--mp-olive);
-  --color-mp-gold: var(--mp-gold);
-  --color-mp-red: var(--mp-red);
-  --color-mp-purple: var(--mp-purple);
+  --color-mp-bg: var(--mp-bg);
   --color-mp-surface: var(--mp-surface);
+  --color-mp-accent: var(--mp-accent);
+  --color-mp-accent-2: var(--mp-accent-2);
   --color-mp-text: var(--mp-text);
+  --color-mp-text-dim: var(--mp-text-dim);
+  --color-mp-mono: var(--mp-mono);
   --font-display: var(--mp-font-display);
   --font-body: var(--mp-font-body);
   --font-mono: var(--mp-font-mono);
-  --shadow-clay: var(--mp-shadow-clay);
   --radius-card: var(--mp-radius-card);
   --radius-pill: var(--mp-radius-pill);
 }
 
+/* Type scale — the six roles, all in rem, two body weights (400/600) only.
+   wordmark  clamp(2.5rem, 8vw, 5rem) / 400 / 0.95  / -0.01em  (display face)
+   H1        clamp(1.875rem, 4vw, 3rem) / 600 / 1.05 / -0.02em
+   tagline   1.0625rem / 400 / 1.4 / 0.04em
+   body      1rem / 400 / 1.55 / 0
+   label     0.8125rem / 600 / 1.3 / 0.01em
+   mono      clamp(0.875rem, 2vw, 1rem) / 400 / 1.45 / 0 + tabular-nums */
+
 html {
-  background: var(--mp-surface);
+  background: var(--mp-bg);
   color: var(--mp-text);
 }
 
@@ -27,12 +34,12 @@ body {
   min-width: 320px;
   min-height: 100svh;
   overflow-x: hidden;
-  background: var(--mp-surface);
+  background: var(--mp-bg);
   color: var(--mp-text);
   font-family: var(--mp-font-body);
-  transition:
-    background-color var(--mp-motion-view),
-    color var(--mp-motion-view);
+  font-size: 1rem;
+  font-weight: 400;
+  line-height: 1.55;
 }
 
 *,
@@ -71,7 +78,6 @@ input[type="checkbox"] {
   align-items: center;
   justify-content: center;
   padding: clamp(1rem, 3vw, 3rem);
-  transition: background-color var(--mp-motion-view);
 }
 
 .drop-zone {
@@ -90,23 +96,21 @@ input[type="checkbox"] {
 }
 
 .drop-zone--dragging {
-  border-color: var(--mp-olive);
+  border-color: var(--mp-accent);
   border-style: dashed;
-  background: var(--mp-gold-wash);
+  background: var(--mp-wash-accent);
 }
 
+/* The card is the one surface step in the design, and it is a quiet one:
+   --mp-surface is 1.11:1 against --mp-bg. The hairline does the separating,
+   which is why it is not optional here. */
 .room-card {
   width: min(100%, 56rem);
   overflow: hidden;
   border: 1px solid var(--mp-border);
   border-radius: var(--mp-radius-card);
   background: var(--mp-card);
-  box-shadow: var(--mp-shadow-clay);
   padding: clamp(1.25rem, 4vw, 3rem);
-  transition:
-    background-color var(--mp-motion-view),
-    box-shadow var(--mp-motion-view),
-    transform var(--mp-motion-view);
 }
 
 .room-card--compact {
@@ -132,6 +136,7 @@ input[type="checkbox"] {
   font-family: var(--mp-font-display);
   font-size: clamp(2.5rem, 8vw, 5rem);
   font-weight: 400;
+  letter-spacing: -0.01em;
   line-height: 0.95;
 }
 
@@ -139,41 +144,54 @@ input[type="checkbox"] {
   margin: 0;
   color: var(--mp-text);
   font-size: clamp(1.875rem, 4vw, 3rem);
-  font-weight: 700;
-  letter-spacing: -0.04em;
+  font-weight: 600;
+  letter-spacing: -0.02em;
   line-height: 1.05;
+}
+
+/* The only place an outline is suppressed, and it is safe: main.tsx focuses
+   this heading programmatically on view change so screen readers announce it,
+   but it carries tabIndex={-1} and is never in the tab order. No keyboard user
+   can reach it, so the ring indicated nothing — while visually a full-width
+   honey box around the heading read as a text input. */
+.view-heading:focus-visible {
+  outline: none;
 }
 
 .tagline {
   margin: 0;
-  color: var(--mp-muted);
-  font-size: 1.05rem;
-  font-weight: 500;
+  color: var(--mp-text-dim);
+  font-size: 1.0625rem;
+  font-weight: 400;
   letter-spacing: 0.04em;
+  line-height: 1.4;
 }
 
 .voice-copy {
   max-width: 42rem;
   margin: 0;
-  color: var(--mp-muted);
+  color: var(--mp-text-dim);
   font-size: 1rem;
+  font-weight: 400;
   line-height: 1.55;
 }
 
+/* Room status is ambient: a wash and a dim label, no accent, no border
+   emphasis. It must not read as an action. */
 .status-banner {
   display: grid;
   gap: 0.35rem;
   border-radius: 1.125rem;
-  background: color-mix(in srgb, var(--mp-olive) 7%, var(--mp-card));
+  background: var(--mp-wash-subtle);
   padding: 1rem 1.125rem;
 }
 
 .status-banner__label {
-  color: var(--mp-text);
-  font-size: 0.75rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+  color: var(--mp-text-dim);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1.3;
 }
 
 .room-link {
@@ -181,20 +199,28 @@ input[type="checkbox"] {
   gap: 0.5rem;
   border: 1px solid var(--mp-border);
   border-radius: 1.125rem;
-  background: var(--mp-surface-raised);
+  background: var(--mp-wash-subtle);
   padding: 1rem;
 }
 
+/* Every technical value gets tabular figures so digits stop shifting as
+   transfer counters tick. */
 .room-link__value,
-.mono {
+.mono,
+.progress-stats,
+.technical-grid__row dd,
+.error-detail code {
   font-family: var(--mp-font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .room-link__value {
   min-width: 0;
   overflow-wrap: anywhere;
-  color: var(--mp-text);
-  font-size: clamp(0.88rem, 2vw, 1rem);
+  color: var(--mp-mono);
+  font-size: clamp(0.875rem, 2vw, 1rem);
+  font-weight: 400;
+  line-height: 1.45;
 }
 
 .button-row {
@@ -204,9 +230,15 @@ input[type="checkbox"] {
   align-items: center;
 }
 
+/* Three tiers, and the gap between them is the whole point: before this the
+   two file pickers shared one rule and looked identical, so nothing answered
+   "what do I click". State is carried by fill, border and colour only — the
+   old translateY lift is gone because a lift with no shadow reads as a glitch
+   on flat surfaces. */
 .button,
 .picker-label {
   display: inline-flex;
+  min-width: 44px;
   min-height: 44px;
   align-items: center;
   justify-content: center;
@@ -214,63 +246,100 @@ input[type="checkbox"] {
   border: 1px solid transparent;
   border-radius: var(--mp-radius-pill);
   cursor: pointer;
-  padding: 0.7rem 1.05rem;
-  font-weight: 500;
+  padding: 0.7rem 1.15rem;
+  font-size: 1rem;
+  font-weight: 400;
   line-height: 1.2;
   text-align: center;
   transition:
     background-color var(--mp-motion-fast),
     border-color var(--mp-motion-fast),
-    transform var(--mp-motion-fast);
+    color var(--mp-motion-fast);
 }
 
-.button:hover,
-.picker-label:hover {
-  transform: translateY(-1px);
+/* Tier 1 — exactly one per view. --mp-on-accent is --mp-bg: the light text
+   that used to sit here measures 2.61:1 on terracotta and fails AA. */
+.button--primary,
+.picker-label--primary {
+  border-color: var(--mp-accent);
+  background: var(--mp-accent);
+  color: var(--mp-on-accent);
+  font-weight: 600;
 }
 
-.button:active,
-.picker-label:active {
-  transform: translateY(1px);
+.button--primary:hover,
+.picker-label--primary:hover {
+  border-color: var(--mp-accent-hover);
+  background: var(--mp-accent-hover);
 }
 
-.button--primary {
-  border-color: var(--mp-red);
-  background: var(--mp-red);
-  color: var(--mp-cream);
-  font-weight: 700;
+.button--primary:active,
+.picker-label--primary:active {
+  border-color: var(--mp-accent-active);
+  background: var(--mp-accent-active);
 }
 
-.button--primary:hover {
-  background: color-mix(in srgb, var(--mp-red) 92%, var(--mp-olive));
-}
-
+/* Tier 2 — outlined sibling. The border is the only thing identifying it, so
+   it uses --mp-border-control (3:1), not the decorative hairline (1.3:1). */
 .button--secondary,
-.picker-label {
-  border-color: var(--mp-olive);
+.picker-label--secondary {
+  border-color: var(--mp-border-control);
   background: transparent;
   color: var(--mp-text);
+  font-weight: 400;
 }
 
 .button--secondary:hover,
-.picker-label:hover {
-  background: color-mix(in srgb, var(--mp-olive) 8%, transparent);
+.picker-label--secondary:hover {
+  border-color: var(--mp-accent);
+  background: var(--mp-wash-accent);
 }
 
+.button--secondary:active,
+.picker-label--secondary:active {
+  border-color: var(--mp-accent-active);
+  background: var(--mp-wash-accent);
+}
+
+/* Tier 3 — deliberately quiet, not invisible. The label stays at
+   --mp-text-dim (7.48:1 on bg); quietness comes from losing the border and
+   fill, never from dropping contrast. */
+/* Shrink to content: as a grid child it stretched to the full 798px column,
+   which made the tertiary action the widest control on the page. */
 .button--ghost {
+  justify-self: start;
+  width: fit-content;
   border-color: transparent;
   background: transparent;
-  color: var(--mp-text);
+  color: var(--mp-text-dim);
+  font-weight: 400;
+  text-decoration: underline;
+  text-decoration-color: var(--mp-border-control);
+  text-underline-offset: 0.2em;
 }
 
 .button--ghost:hover {
-  background: color-mix(in srgb, var(--mp-olive) 8%, transparent);
+  background: var(--mp-wash-accent);
+  color: var(--mp-text);
+  text-decoration-color: var(--mp-accent);
 }
 
-.button:disabled {
+.button--ghost:active {
+  background: var(--mp-wash-accent);
+  color: var(--mp-accent-2);
+}
+
+/* Disabled is a flat chip, never opacity: opacity 0.4 on a filled button
+   collapses its label to 1.41:1, and even 0.6 only reaches 2.10. This holds
+   5.77:1. Listed last so it wins the cascade over every tier above. */
+.button:disabled,
+.button:disabled:hover,
+.button:disabled:active {
+  border-color: var(--mp-border);
+  background: var(--mp-wash-subtle);
+  color: var(--mp-text-dim);
   cursor: not-allowed;
-  opacity: 0.4;
-  transform: none;
+  font-weight: 400;
 }
 
 .picker-label {
@@ -310,7 +379,7 @@ input[type="checkbox"] {
   gap: 0.9rem;
   border: 1px solid var(--mp-border);
   border-radius: 1.5rem;
-  background: var(--mp-surface-raised);
+  background: var(--mp-wash-subtle);
   padding: clamp(1rem, 3vw, 1.5rem);
 }
 
@@ -325,21 +394,24 @@ input[type="checkbox"] {
 .file-name {
   min-width: 0;
   overflow-wrap: anywhere;
-  font-size: 1.1rem;
-  font-weight: 700;
+  color: var(--mp-text);
+  font-size: 1.125rem;
+  font-weight: 600;
 }
 
 .muted {
-  color: var(--mp-muted);
+  color: var(--mp-text-dim);
 }
 
+/* The plate stays light because a dark QR on a dark card will not scan.
+   --mp-qr-plate is the palette's own lightest value, not a new hue. */
 .qr-wrap {
   display: grid;
   width: min(100%, 13rem);
   justify-items: center;
   gap: 0.5rem;
   border-radius: 1rem;
-  background: var(--mp-cream);
+  background: var(--mp-qr-plate);
   padding: 0.75rem;
 }
 
@@ -356,15 +428,28 @@ input[type="checkbox"] {
   align-items: center;
 }
 
+/* Disclosures are ambient: a hairline rule and a dim summary, nothing that
+   competes with the action row. */
 .password-panel {
   border-top: 1px solid var(--mp-border);
   padding-top: 0.75rem;
 }
 
-.password-panel summary {
+.password-panel summary,
+.error-detail summary {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
   cursor: pointer;
+  color: var(--mp-text-dim);
+  font-size: 0.9375rem;
+  font-weight: 400;
+  transition: color var(--mp-motion-fast);
+}
+
+.password-panel summary:hover,
+.error-detail summary:hover {
   color: var(--mp-text);
-  font-weight: 500;
 }
 
 .password-field {
@@ -373,20 +458,31 @@ input[type="checkbox"] {
   margin-top: 0.75rem;
 }
 
+/* Recessed against the panel, and the border is the affordance so it takes the
+   3:1 control strength. */
 .password-field input {
   min-height: 44px;
   width: 100%;
-  border: 1px solid var(--mp-olive);
+  border: 1px solid var(--mp-border-control);
   border-radius: 0.75rem;
-  background: var(--mp-surface);
+  background: var(--mp-bg);
   color: var(--mp-text);
   padding: 0.65rem 0.75rem;
+  transition: border-color var(--mp-motion-fast);
+}
+
+.password-field input::placeholder {
+  color: var(--mp-text-dim);
+}
+
+.password-field input:hover {
+  border-color: var(--mp-accent);
 }
 
 .password-note {
   margin: 0;
-  color: var(--mp-muted);
-  font-size: 0.82rem;
+  color: var(--mp-text-dim);
+  font-size: 0.8125rem;
   line-height: 1.45;
 }
 
@@ -395,7 +491,7 @@ input[type="checkbox"] {
   gap: 0.9rem;
   border: 1px solid var(--mp-border);
   border-radius: 1.5rem;
-  background: var(--mp-surface-raised);
+  background: var(--mp-wash-subtle);
   padding: clamp(1rem, 3vw, 1.5rem);
 }
 
@@ -404,34 +500,25 @@ input[type="checkbox"] {
   gap: 0.75rem;
 }
 
+/* In-progress state. The track reads at 3.06:1 against the surface; the honey
+   fill against the track is 2.83:1, which is a deliberate trade — the two move
+   in opposite directions and no value satisfies both. It is sound because the
+   bar is aria-hidden and .progress-stats carries the actual value, so colour is
+   never the sole indicator. Do not weaken the track to "fix" the fill. */
 .progress-track {
   height: 1rem;
   overflow: hidden;
-  border: 1px solid var(--mp-olive);
   border-radius: var(--mp-radius-pill);
-  background: color-mix(in srgb, var(--mp-olive) 9%, var(--mp-card));
+  background: var(--mp-track);
 }
 
+/* No transition on width: the value is driven by React state on every tick, so
+   interpolating it only adds layout passes between ticks. */
 .progress-fill {
-  position: relative;
   height: 100%;
   min-width: 0;
   border-radius: inherit;
-  background: linear-gradient(90deg, var(--mp-gold), var(--mp-red));
-  transition: width var(--mp-motion-fast);
-}
-
-.progress-fill::after {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    110deg,
-    transparent 25%,
-    color-mix(in srgb, var(--mp-cream) 35%, transparent) 50%,
-    transparent 75%
-  );
-  content: "";
-  animation: progress-shimmer 1.8s linear infinite;
+  background: var(--mp-accent-2);
 }
 
 .progress-stats {
@@ -439,8 +526,8 @@ input[type="checkbox"] {
   flex-wrap: wrap;
   justify-content: space-between;
   gap: 0.5rem 1rem;
-  color: var(--mp-muted);
-  font-size: 0.9rem;
+  color: var(--mp-text-dim);
+  font-size: 0.875rem;
 }
 
 .technical-grid {
@@ -454,59 +541,63 @@ input[type="checkbox"] {
   display: grid;
   grid-template-columns: minmax(6rem, 1fr) minmax(0, 2fr);
   gap: 1rem;
-  color: var(--mp-muted);
-  font-size: 0.8rem;
+  color: var(--mp-text-dim);
+  font-size: 0.8125rem;
 }
 
 .technical-grid__row dd {
   min-width: 0;
   margin: 0;
   overflow-wrap: anywhere;
-  color: var(--mp-text);
+  color: var(--mp-mono);
   text-align: right;
 }
 
 .result-line {
   overflow-wrap: anywhere;
-  color: var(--mp-muted);
-  font-size: 0.85rem;
+  color: var(--mp-text-dim);
+  font-size: 0.875rem;
+}
+
+/* Success and error are both warm and one hue step apart, so the tint only
+   reinforces — the panel's own heading and result text carry the meaning.
+   That is the WCAG 1.4.1 requirement, and it is why no colour-only cue exists
+   in either state. */
+.completion-card {
+  border-color: color-mix(in srgb, var(--mp-accent-2) 40%, transparent);
+  background: var(--mp-tint-success);
 }
 
 .failure-card {
-  border-color: var(--mp-red);
-  background: color-mix(in srgb, var(--mp-red) 8%, var(--mp-card));
+  border-color: color-mix(in srgb, var(--mp-accent) 55%, transparent);
+  background: var(--mp-tint-error);
 }
 
 .failure-card h3 {
   margin: 0;
   color: var(--mp-text);
-  font-size: 1.15rem;
+  font-size: 1.125rem;
+  font-weight: 600;
 }
 
 .error-detail {
   color: var(--mp-text);
-  font-size: 0.8rem;
-}
-
-.error-detail summary {
-  cursor: pointer;
-  font-weight: 500;
+  font-size: 0.8125rem;
 }
 
 .error-detail code {
   display: block;
   overflow-wrap: anywhere;
   margin-top: 0.5rem;
-  color: var(--mp-text);
-  font-family: var(--mp-font-mono);
+  color: var(--mp-mono);
   white-space: pre-wrap;
 }
 
 .privacy-note {
   max-width: 48rem;
   margin: 1rem auto 0;
-  color: var(--mp-muted);
-  font-size: 0.75rem;
+  color: var(--mp-text-dim);
+  font-size: 0.8125rem;
   line-height: 1.5;
   text-align: center;
 }
@@ -519,9 +610,17 @@ input[type="checkbox"] {
 .legal-footer a,
 .legal-copy a {
   color: var(--mp-text);
-  font-weight: 700;
+  font-weight: 600;
   text-decoration: underline;
+  text-decoration-color: var(--mp-accent);
   text-underline-offset: 0.15em;
+  transition: color var(--mp-motion-fast);
+}
+
+.privacy-note a:hover,
+.legal-footer a:hover,
+.legal-copy a:hover {
+  color: var(--mp-accent-2);
 }
 
 .legal-links {
@@ -547,7 +646,7 @@ input[type="checkbox"] {
 
 .legal-copy p {
   margin: 0;
-  color: var(--mp-muted);
+  color: var(--mp-text-dim);
 }
 
 .legal-footer {
@@ -570,15 +669,6 @@ input[type="checkbox"] {
   white-space: nowrap;
 }
 
-@keyframes progress-shimmer {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(100%);
-  }
-}
-
 @media (max-width: 42rem) {
   .staged-card__body {
     grid-template-columns: 1fr;
@@ -596,18 +686,25 @@ input[type="checkbox"] {
   .technical-grid__row dd {
     text-align: left;
   }
+
+  /* The two file pickers stack here. Below this width they would wrap anyway
+     via their 13rem flex-basis; stating it makes the breakpoint deterministic
+     rather than an emergent side effect of the basis. */
+  .file-picker-row > * {
+    flex: 1 1 100%;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .progress-fill::after {
-    display: none;
-  }
-
   .drop-zone,
-  .room-card,
   .button,
   .picker-label,
-  .progress-fill {
+  .password-panel summary,
+  .error-detail summary,
+  .password-field input,
+  .privacy-note a,
+  .legal-footer a,
+  .legal-copy a {
     transition: none;
   }
 }

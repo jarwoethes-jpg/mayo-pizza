@@ -644,8 +644,11 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     void import("qrcode")
       .then(async ({ toString: makeQrSvg }) => {
         const styles = getComputedStyle(document.documentElement);
-        const dark = styles.getPropertyValue("--mp-olive").trim();
-        const light = styles.getPropertyValue("--mp-cream").trim();
+        // Scanners need dark modules on a light plate, so this pair stays
+        // inverted relative to the rest of the dark theme. --mp-qr-plate is the
+        // palette's lightest value, matching the .qr-wrap backing behind it.
+        const dark = styles.getPropertyValue("--mp-bg").trim();
+        const light = styles.getPropertyValue("--mp-qr-plate").trim();
         const svg = await makeQrSvg(technicalShareUrl, {
           type: "svg",
           margin: 1,
@@ -834,7 +837,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
               {stagedSelection === undefined && (
                 <div className="file-picker-row">
                   <label
-                    className="picker-label"
+                    className="picker-label picker-label--primary"
                     data-testid="file-picker-label"
                     htmlFor="file-input"
                     onKeyDown={(event) => {
@@ -859,7 +862,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
                     />
                   </label>
                   <label
-                    className="picker-label"
+                    className="picker-label picker-label--secondary"
                     htmlFor="folder-input"
                     // biome-ignore lint/a11y/noNoninteractiveTabindex: the label is the visible keyboard folder-picker affordance
                     tabIndex={0}
