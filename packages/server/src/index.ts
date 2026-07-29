@@ -702,6 +702,19 @@ export const createServer = (options: ServerOptions = {}): ServerHandle => {
   });
   if (existsSync(`${webRoot}/index.html`)) {
     app.register(fastifyStatic, { root: webRoot });
+    app.setNotFoundHandler(async (request, reply) => {
+      if (
+        (request.method === "GET" || request.method === "HEAD") &&
+        request.headers.accept?.includes("text/html") === true
+      ) {
+        return reply.sendFile("index.html");
+      }
+      return reply.code(404).send({
+        message: `Route ${request.method}:${request.url} not found`,
+        error: "Not Found",
+        statusCode: 404,
+      });
+    });
   }
 
   const upgradeHandler = (
