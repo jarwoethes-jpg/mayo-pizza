@@ -1,0 +1,6 @@
+FROM caddy:2.11.4-builder-alpine AS builder
+# WHY: caddy-l4 v0.1.2 is built against Caddy v2.11.4.
+RUN xcaddy build v2.11.4 --with github.com/mholt/caddy-l4@v0.1.2
+
+FROM caddy:2.11.4-alpine
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy

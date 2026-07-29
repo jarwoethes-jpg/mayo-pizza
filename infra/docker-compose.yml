@@ -16,6 +16,8 @@ services:
       TURN_HOST: ${TURN_HOST:-mayo.pizza}
       STUN_PORT: ${STUN_PORT:-3478}
       TURN_PORT: ${TURN_PORT:-3478}
+      TURNS_HOST: ${TURNS_HOST:-turn.${PUBLIC_HOSTNAME:-mayo.pizza}}
+      TURNS_PORT: ${TURNS_PORT:-443}
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.30.0.2}
       TURN_STATIC_SECRET: ${TURN_STATIC_SECRET:?TURN_STATIC_SECRET must be set}
       RATE_LIMIT_CREATE: ${RATE_LIMIT_CREATE:-10}
@@ -42,10 +44,13 @@ services:
         ipv4_address: 172.30.0.3
 
   caddy:
-    image: caddy:2-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
     ports:
       - "80:80"
       - "443:443"
+    extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - caddy_data:/data
       - caddy_config:/config

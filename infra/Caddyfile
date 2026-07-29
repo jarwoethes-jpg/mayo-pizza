@@ -1,3 +1,38 @@
+{
+	https_port 8443
+	auto_https disable_redirects
+
+	servers :8443 {
+		listener_wrappers {
+			proxy_protocol {
+				allow 127.0.0.1/32
+			}
+			tls
+		}
+	}
+
+	layer4 {
+		:443 {
+			@turn tls sni turn.mayo.pizza
+			route @turn {
+				tls
+				proxy host.docker.internal:3478
+			}
+
+			route {
+				proxy {
+					proxy_protocol v2
+					upstream 127.0.0.1:8443
+				}
+			}
+		}
+	}
+}
+
+http://mayo.pizza, http://turn.mayo.pizza {
+	redir https://{host}{uri}
+}
+
 mayo.pizza {
 	encode zstd gzip
 	import security-headers.caddy
@@ -9,4 +44,8 @@ mayo.pizza {
 	handle {
 		reverse_proxy app:3000
 	}
+}
+
+turn.mayo.pizza {
+	respond 404
 }

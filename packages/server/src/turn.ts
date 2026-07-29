@@ -6,8 +6,10 @@ export interface TurnConfig {
   staticSecret: string;
   stunHost: string;
   turnHost: string;
+  turnsHost: string;
   stunPort: number;
   turnPort: number;
+  turnsPort: number;
 }
 
 export interface TurnCredentials {
@@ -29,8 +31,10 @@ export const createTurnConfig = (
     staticSecret: env.TURN_STATIC_SECRET ?? "",
     stunHost: env.STUN_HOST ?? publicHostname,
     turnHost: env.TURN_HOST ?? publicHostname,
+    turnsHost: env.TURNS_HOST ?? `turn.${publicHostname}`,
     stunPort: parsePort(env.STUN_PORT, 3478),
     turnPort: parsePort(env.TURN_PORT, 3478),
+    turnsPort: parsePort(env.TURNS_PORT, 443),
   };
 };
 
@@ -66,10 +70,11 @@ export const createIceServers = (
     { urls: [`stun:${config.stunHost}:${config.stunPort}`] },
     {
       urls: [
-        // WHY: coturn has no certificate material for a TLS listener, so we
-        // deliberately omit TLS-wrapped `turns:` URLs.
+        // WHY: `turns:` on 443 is terminated by caddy-l4 (SNI multiplex) and
+        // proxied to coturn's plain TCP listener, so coturn needs no cert material.
         `turn:${config.turnHost}:${config.turnPort}?transport=udp`,
         `turn:${config.turnHost}:${config.turnPort}?transport=tcp`,
+        `turns:${config.turnsHost}:${config.turnsPort}?transport=tcp`,
       ],
       username: credentials.username,
       credential: credentials.credential,

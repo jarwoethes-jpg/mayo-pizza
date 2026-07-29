@@ -113,9 +113,9 @@ The defaults below are the effective compose defaults unless marked as a standal
 
 Before first boot:
 
-- Create DNS A and/or AAAA records for `mayo.pizza` pointing to the host.
+- Create DNS A and/or AAAA records for `mayo.pizza` pointing to the host, plus a DNS-only A record for `turn.mayo.pizza` pointing to the same host.
 - If Cloudflare fronts the name, use DNS-only / the grey cloud. Caddy's ACME HTTP challenge must reach the host directly, and WebRTC/TURN traffic must not be sent through Cloudflare's HTTP proxy.
-- Make ports 80 and 443 reachable by Caddy, and expose the TURN listener and relay range required by `infra/docker-compose.yml` (TCP/UDP 3478 and UDP 49160–49200).
+- Make ports 80 and 443 reachable by Caddy; TURNS needs no new port because it rides 443. Expose the TURN listener and relay range required by `infra/docker-compose.yml` (TCP/UDP 3478 and UDP 49160–49200).
 - Set `TURN_STATIC_SECRET` and `METRICS_TOKEN` as Portainer stack environment values. Keep both out of git. Change the hostname/ICE values only when the DNS and firewall plan also changes.
 
 Validate interpolation before deploying:
