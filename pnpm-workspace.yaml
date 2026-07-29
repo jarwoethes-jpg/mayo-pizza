@@ -1,7 +1,6 @@
 packages:
   - "packages/*"
+# allowBuilds is the pnpm 11 setting; onlyBuiltDependencies is not honored.
 allowBuilds:
-  argon2: set this to true or false
-onlyBuiltDependencies:
-  - esbuild
-  - argon2
+  argon2: true
+  esbuild: true

@@ -10,9 +10,12 @@ COPY packages/web/package.json packages/web/package.json
 RUN pnpm install --frozen-lockfile
 
 COPY packages packages
+COPY infra/header-source.mjs infra/headers.json ./infra/
 RUN pnpm --filter web build
 RUN pnpm --filter server... build
-RUN pnpm deploy --filter server --prod /app/runtime
+# pnpm 10+ deploy requires injected workspace packages; prefer deprecated --legacy because injectWorkspacePackages: true changes local installs and the lockfile pinned by --frozen-lockfile.
+# Replace --legacy with the injected-workspace approach when it is removed.
+RUN pnpm deploy --legacy --filter server --prod /app/runtime
 
 FROM node:22-alpine AS runtime
 
