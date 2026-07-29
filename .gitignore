@@ -4,3 +4,6 @@ dist/
 playwright-report/
 test-results/
 pnpm-debug.log
+.env
+.env.*
+!.env.example
