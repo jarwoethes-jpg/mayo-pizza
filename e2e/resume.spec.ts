@@ -12,12 +12,12 @@ import {
   test,
 } from "@playwright/test";
 import { readOpfsSha256 } from "./inPageHash";
+import { baseURL, signalingUrl } from "./target";
 
 const testFile = process.env.MAYO_TEST_FILE;
 const expectedHash =
   process.env.MAYO_TEST_FILE_SHA256 ??
   "df095bbf6d64c3b9889c92f715b69d97c392c07af7d2ab73851b981e8f62456e";
-const signalingUrl = "ws://127.0.0.1:3100/ws";
 const totalBytes = 1_073_741_824;
 
 const addBaseInitScript = async (context: BrowserContext): Promise<void> => {
@@ -117,7 +117,7 @@ const openPairWithFsa = async (
   const contextA = await browser.newContext();
   const userDataDir = await mkdtemp(join(tmpdir(), "mayo-resume-"));
   const contextB = await chromium.launchPersistentContext(userDataDir, {
-    baseURL: "http://127.0.0.1:5173",
+    baseURL,
   });
   await addBaseInitScript(contextA);
   await addBaseInitScript(contextB);

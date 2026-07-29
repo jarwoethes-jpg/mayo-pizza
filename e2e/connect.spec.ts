@@ -1,11 +1,14 @@
 import { expect, test } from "@playwright/test";
-
-const signalingUrl = "ws://127.0.0.1:3100/ws";
+import { isRemoteTarget, signalingUrl } from "./target";
 
 test("connects two browser contexts and completes ctrl ping/pong", async ({
   browser,
 }) => {
   const forceRelay = process.env.MAYO_FORCE_RELAY === "1";
+  test.skip(
+    isRemoteTarget && forceRelay,
+    "The forced-relay test needs the local coturn.",
+  );
   const contextA = await browser.newContext();
   const contextB = await browser.newContext();
 

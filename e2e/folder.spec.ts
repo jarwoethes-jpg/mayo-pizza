@@ -13,10 +13,10 @@ import {
   type Page,
   test,
 } from "@playwright/test";
+import { baseURL, signalingUrl } from "./target";
 import { startTransferFailureMonitor } from "./transferFailureMonitor";
 
 const execFile = promisify(execFileCallback);
-const signalingUrl = "ws://127.0.0.1:3100/ws";
 const mainTree = process.env.MAYO_TREE ?? "/tmp/mayo-tree";
 const skipTree = process.env.MAYO_TREE_SKIP ?? "/tmp/mayo-tree-skip";
 const zip64Tree = process.env.MAYO_TREE_ZIP64 ?? "/tmp/mayo-tree-zip64";
@@ -276,7 +276,7 @@ test.describe("folder ZIP transfers", () => {
     );
     const userDataDir = await mkdtemp(join(tmpdir(), "mayo-folder-"));
     const contextB = await chromium.launchPersistentContext(userDataDir, {
-      baseURL: "http://127.0.0.1:5173",
+      baseURL,
     });
     let contextA: BrowserContext | undefined;
     let memory: MemorySampler | undefined;
@@ -317,7 +317,7 @@ test.describe("folder ZIP transfers", () => {
     );
     const userDataDir = await mkdtemp(join(tmpdir(), "mayo-folder-skip-"));
     const contextB = await chromium.launchPersistentContext(userDataDir, {
-      baseURL: "http://127.0.0.1:5173",
+      baseURL,
     });
     let contextA: BrowserContext | undefined;
     let archivePath: string | undefined;
@@ -359,7 +359,7 @@ test.describe("folder ZIP transfers", () => {
     test.skip(browserName !== "chromium", "ZIP64 heap gate is Chromium-only.");
     const userDataDir = await mkdtemp(join(tmpdir(), "mayo-folder-zip64-"));
     const contextB = await chromium.launchPersistentContext(userDataDir, {
-      baseURL: "http://127.0.0.1:5173",
+      baseURL,
     });
     let contextA: BrowserContext | undefined;
     let memory: MemorySampler | undefined;

@@ -12,6 +12,7 @@ import {
   test,
 } from "@playwright/test";
 import { readOpfsSha256 } from "./inPageHash";
+import { baseURL, signalingUrl } from "./target";
 import { startTransferFailureMonitor } from "./transferFailureMonitor";
 
 const HIGH_WATERMARK = 8 * 1024 * 1024;
@@ -24,7 +25,6 @@ const blobFile = process.env.MAYO_TEST_FILE_100M;
 const blobHash = process.env.MAYO_TEST_FILE_100M_SHA256;
 const blobLargeFile = process.env.MAYO_TEST_FILE_600M;
 const slowFile = process.env.MAYO_TEST_FILE_SLOW;
-const signalingUrl = "ws://127.0.0.1:3100/ws";
 
 const sha256File = (path: string): Promise<string> =>
   new Promise((resolve, reject) => {
@@ -209,7 +209,7 @@ test.describe("streaming download sinks", () => {
     let memory: MemorySampler | undefined;
     try {
       contextB = await chromium.launchPersistentContext(userDataDir, {
-        baseURL: "http://127.0.0.1:5173",
+        baseURL,
       });
       const pair = await openPair(browser, addFsaInitScript, contextB);
       contextA = pair.contextA;

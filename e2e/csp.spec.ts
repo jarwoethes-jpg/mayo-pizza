@@ -15,8 +15,7 @@ import {
 // @ts-expect-error -- plain-JS infra module shared with the Caddy generator; typed via JSDoc.
 import { buildHeaders } from "../infra/header-source.mjs";
 import { readOpfsSha256 } from "./inPageHash";
-
-const signalingUrl = "ws://127.0.0.1:3100/ws";
+import { baseURL, signalingUrl } from "./target";
 
 // Compare against the composed PREVIEW policy, not raw headers.json: production and preview
 // share one core string but differ in connect-src, and the anti-drift guarantee is that both
@@ -284,7 +283,7 @@ test.describe("Content Security Policy and HTTP security headers", () => {
 
     try {
       contextB = await chromium.launchPersistentContext(userDataDir, {
-        baseURL: "http://127.0.0.1:5173",
+        baseURL,
       });
       const pair = await openMonitoredPair(browser, "fsa", contextB);
       contextA = pair.contextA;

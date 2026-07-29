@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream, statSync } from "node:fs";
 import { expect, type Page, test } from "@playwright/test";
+import { signalingUrl } from "./target";
 
 const HIGH_WATERMARK = 8 * 1024 * 1024;
 const LOW_THRESHOLD = 1 * 1024 * 1024;
@@ -287,7 +288,6 @@ test.describe("single-file transfer", () => {
     const contextA = await browser.newContext();
     const contextB = await browser.newContext();
     const forceRelay = process.env.MAYO_FORCE_RELAY === "1";
-    const signalingUrl = "ws://127.0.0.1:3100/ws";
     for (const context of [contextA, contextB]) {
       await context.addInitScript(
         ({ corrupt, forceRelay: shouldForceRelay, url }) => {
@@ -392,7 +392,6 @@ test.describe("single-file transfer", () => {
 
     const contextA = await browser.newContext();
     const contextB = await browser.newContext();
-    const signalingUrl = "ws://127.0.0.1:3100/ws";
     const forceRelay = process.env.MAYO_FORCE_RELAY === "1";
     await contextA.addInitScript(
       ({ forceRelay: shouldForceRelay, url }) => {

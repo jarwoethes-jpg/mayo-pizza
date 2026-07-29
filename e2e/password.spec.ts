@@ -1,7 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
-
-const signalingUrl = "ws://127.0.0.1:3100/ws";
+import { signalingUrl } from "./target";
 
 const expectA11y = async (
   page: import("@playwright/test").Page,

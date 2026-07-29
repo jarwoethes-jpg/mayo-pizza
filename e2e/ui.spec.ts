@@ -10,8 +10,8 @@ import {
   type Page,
   test,
 } from "@playwright/test";
+import { signalingUrl } from "./target";
 
-const signalingUrl = "ws://127.0.0.1:3100/ws";
 let fixtureDir: string;
 let smallFile: string;
 let transferFile: string;
