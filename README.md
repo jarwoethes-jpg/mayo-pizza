@@ -60,11 +60,12 @@ pnpm e2e:fixtures -- --print-exports
 ```
 
 The path variables below override the `/tmp` defaults. The `*_SHA256` variables are printed exports, not input paths. `MAYO_TEST_FILE_SLOW` is the 64 MiB slow-sink fixture; the sink spec has no independent byte assertion for it.
+When `MAYO_TEST_FILE` is exported, `MAYO_TEST_FILE_SHA256` is mandatory; `--print-exports` emits both together.
 
 | Variable | Default |
 | --- | --- |
 | `MAYO_TEST_FILE` | `/tmp/mayo-test-file.bin` (`--full`) |
-| `MAYO_TEST_FILE_SHA256` | computed by the generator |
+| `MAYO_TEST_FILE_SHA256` | computed by the generator; required whenever `MAYO_TEST_FILE` is set |
 | `MAYO_TEST_FILE_SW_FIREFOX` | `/tmp/mayo-test-file-sw-firefox.bin` |
 | `MAYO_TEST_FILE_SW_FIREFOX_SHA256` | computed by the generator |
 | `MAYO_TEST_FILE_100M` | `/tmp/mayo-test-file-100m.bin` |

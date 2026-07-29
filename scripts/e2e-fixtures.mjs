@@ -511,6 +511,15 @@ const verifyRecordContent = async (record) => {
   return hash.digest("hex");
 };
 
+const hashZeroContent = (size) => {
+  const hash = createHash("sha256");
+  const zeroBuffer = Buffer.alloc(WRITE_CHUNK_BYTES);
+  for (let remaining = size; remaining > 0; remaining -= WRITE_CHUNK_BYTES) {
+    hash.update(zeroBuffer.subarray(0, Math.min(remaining, WRITE_CHUNK_BYTES)));
+  }
+  return hash.digest("hex");
+};
+
 const collectTreeEntries = async (
   root,
   currentPath = "",
@@ -680,6 +689,7 @@ const verifySparseRecord = async (record) => {
   console.log(
     `Verified sparse allocation: ${record.path} uses ${allocatedBytes} allocated bytes for ${stats.size} apparent bytes.`,
   );
+  return stats.blocks;
 };
 
 /** Verifies fixture structure, exact sizes, sparse allocation, and SHA-256 values. */
@@ -698,7 +708,11 @@ export const verifyFixturePlan = async (plan) => {
       );
     }
     if (record.kind === "sparse") {
-      await verifySparseRecord(record);
+      const allocatedBlocks = await verifySparseRecord(record);
+      if (allocatedBlocks === 0) {
+        hashes.set(record.path, hashZeroContent(record.size));
+        continue;
+      }
     }
     hashes.set(record.path, await verifyRecordContent(record));
   }
