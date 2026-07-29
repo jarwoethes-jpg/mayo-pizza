@@ -50,6 +50,31 @@ pnpm --filter web preview --host 127.0.0.1 --port 5173 --strictPort
 
 Run the e2e suite on a host with TCP bind permission and installed browser binaries. The restricted executor used for this change cannot run that browser/network gate.
 
+Recreate the e2e fixtures with the deterministic generator. The default tier creates every fixture except the 1 GiB `MAYO_TEST_FILE`; add `--full` when the transfer and resume gates need it. The generator creates the ZIP64 input sparsely and verifies its structure and hashes automatically:
+
+```bash
+pnpm e2e:fixtures
+pnpm e2e:fixtures -- --full
+pnpm e2e:fixtures -- --verify
+pnpm e2e:fixtures -- --print-exports
+```
+
+The path variables below override the `/tmp` defaults. The `*_SHA256` variables are printed exports, not input paths. `MAYO_TEST_FILE_SLOW` is the 64 MiB slow-sink fixture; the sink spec has no independent byte assertion for it.
+
+| Variable | Default |
+| --- | --- |
+| `MAYO_TEST_FILE` | `/tmp/mayo-test-file.bin` (`--full`) |
+| `MAYO_TEST_FILE_SHA256` | computed by the generator |
+| `MAYO_TEST_FILE_SW_FIREFOX` | `/tmp/mayo-test-file-sw-firefox.bin` |
+| `MAYO_TEST_FILE_SW_FIREFOX_SHA256` | computed by the generator |
+| `MAYO_TEST_FILE_100M` | `/tmp/mayo-test-file-100m.bin` |
+| `MAYO_TEST_FILE_100M_SHA256` | computed by the generator |
+| `MAYO_TEST_FILE_600M` | `/tmp/mayo-test-file-600m.bin` |
+| `MAYO_TEST_FILE_SLOW` | `/tmp/mayo-test-file-slow.bin` |
+| `MAYO_TREE` | `/tmp/mayo-tree` |
+| `MAYO_TREE_SKIP` | `/tmp/mayo-tree-skip` |
+| `MAYO_TREE_ZIP64` | `/tmp/mayo-tree-zip64` |
+
 Regenerate the Caddy header snippet after changing `infra/headers.json`:
 
 ```bash

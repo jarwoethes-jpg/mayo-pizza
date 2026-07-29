@@ -1,6 +1,6 @@
 /// <reference path="./global.d.ts" />
 
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,9 +15,12 @@ import { readOpfsSha256 } from "./inPageHash";
 import { baseURL, signalingUrl } from "./target";
 
 const testFile = process.env.MAYO_TEST_FILE;
-const expectedHash =
-  process.env.MAYO_TEST_FILE_SHA256 ??
-  "df095bbf6d64c3b9889c92f715b69d97c392c07af7d2ab73851b981e8f62456e";
+const expectedHash = process.env.MAYO_TEST_FILE_SHA256;
+if (testFile !== undefined && expectedHash === undefined) {
+  throw new Error(
+    "MAYO_TEST_FILE_SHA256 is required when MAYO_TEST_FILE is set. Run `pnpm e2e:fixtures -- --full --print-exports`.",
+  );
+}
 const totalBytes = 1_073_741_824;
 
 const addBaseInitScript = async (context: BrowserContext): Promise<void> => {
@@ -113,6 +116,7 @@ const openPairWithFsa = async (
   contextB: BrowserContext;
   sender: Page;
   receiver: Page;
+  userDataDir: string;
 }> => {
   const contextA = await browser.newContext();
   const userDataDir = await mkdtemp(join(tmpdir(), "mayo-resume-"));
@@ -138,17 +142,19 @@ const openPairWithFsa = async (
       timeout: 15_000,
     }),
   ]);
-  return { contextA, contextB, sender, receiver };
+  return { contextA, contextB, sender, receiver, userDataDir };
 };
 
 const runResumeTransfer = async (
   browser: Browser,
   dropTargets: readonly number[],
+  file: string,
+  hash: string,
 ): Promise<void> => {
-  const { contextA, contextB, sender, receiver } =
+  const { contextA, contextB, sender, receiver, userDataDir } =
     await openPairWithFsa(browser);
   try {
-    await sender.getByTestId("file-input").setInputFiles(testFile as string);
+    await sender.getByTestId("file-input").setInputFiles(file);
     for (const target of dropTargets) {
       await expect
         .poll(() => readProgressBytes(receiver), { timeout: 300_000 })
@@ -157,17 +163,18 @@ const runResumeTransfer = async (
       await dropAndRestore(contextB, receiver, before);
     }
     await expect(receiver.getByTestId("transfer-result")).toContainText(
-      `verified=true sha256=${expectedHash}`,
+      `verified=true sha256=${hash}`,
       { timeout: 600_000 },
     );
     const fileName = await receiver.evaluate(() => window.__MAYO_OPFS_FILE__);
     if (fileName === undefined) {
       throw new Error("The resume test did not record its OPFS file name.");
     }
-    expect(await readOpfsSha256(receiver, fileName)).toBe(expectedHash);
+    expect(await readOpfsSha256(receiver, fileName)).toBe(hash);
   } finally {
     await contextA.close();
     await contextB.close();
+    await rm(userDataDir, { recursive: true, force: true });
   }
 };
 
@@ -183,10 +190,10 @@ test.describe("same-session transfer resume", () => {
       "MAYO_TEST_FILE is required for resume e2e.",
     );
     test.skip(browserName !== "chromium", "FSA resume uses Chromium OPFS.");
-    if (testFile === undefined) {
+    if (testFile === undefined || expectedHash === undefined) {
       return;
     }
-    await runResumeTransfer(browser, [0.4]);
+    await runResumeTransfer(browser, [0.4], testFile, expectedHash);
   });
 
   test("survives three drops without restarting the transfer", async ({
@@ -198,9 +205,9 @@ test.describe("same-session transfer resume", () => {
       "MAYO_TEST_FILE is required for resume e2e.",
     );
     test.skip(browserName !== "chromium", "FSA resume uses Chromium OPFS.");
-    if (testFile === undefined) {
+    if (testFile === undefined || expectedHash === undefined) {
       return;
     }
-    await runResumeTransfer(browser, [0.25, 0.5, 0.75]);
+    await runResumeTransfer(browser, [0.25, 0.5, 0.75], testFile, expectedHash);
   });
 });
