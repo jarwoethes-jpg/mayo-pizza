@@ -36,6 +36,10 @@ services:
         max-size: "10m"
         max-file: "7"
     restart: unless-stopped
+    # TRUSTED_PROXIES allowlists caddy by IP, so both addresses stay fixed and in agreement regardless of start order.
+    networks:
+      default:
+        ipv4_address: 172.30.0.3
 
   caddy:
     image: caddy:2-alpine
