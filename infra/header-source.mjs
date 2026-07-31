@@ -22,15 +22,16 @@ export const readHeaderSource = (headersPath = defaultHeadersPath) =>
  * Extra `connect-src` origins each environment needs on top of the core policy.
  *
  * WHY: the signalling socket is a different origin from the page in preview (the app is
- * served on :5173 and signals on :3100), so `'self'` cannot cover it. Production must NOT
- * inherit that localhost entry, hence the split — but both policies are still composed from
- * one core string by one function, so they cannot drift apart independently.
+ * served on :5173 and signals on :3100, while the room-expiry gate uses :3101), so `'self'`
+ * cannot cover them. Production must NOT inherit either localhost entry, hence the split —
+ * but both policies are still composed from one core string by one function, so they cannot
+ * drift apart independently.
  *
  * @type {Record<"production" | "preview", readonly string[]>}
  */
 export const CONNECT_SRC_EXTRAS = {
   production: ["wss://mayo.pizza"],
-  preview: ["ws://127.0.0.1:3100"],
+  preview: ["ws://127.0.0.1:3100", "ws://127.0.0.1:3101"],
 };
 
 /**

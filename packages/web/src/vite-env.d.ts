@@ -3,6 +3,8 @@
 interface Window {
   /** Runtime override used by local deployments and Playwright. */
   __MAYO_SIGNALING_URL__?: string;
+  /** Runtime heartbeat interval override used by the expiry Playwright gate. */
+  __MAYO_HEARTBEAT_INTERVAL_MS__?: number;
   /** Runtime relay-policy override used by the forced-relay e2e run. */
   __MAYO_FORCE_RELAY__?: boolean;
   __MAYO_CORRUPT_FRAME__?: boolean;

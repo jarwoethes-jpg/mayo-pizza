@@ -1,5 +1,6 @@
 interface Window {
   __MAYO_SIGNALING_URL__?: string;
+  __MAYO_HEARTBEAT_INTERVAL_MS__?: number;
   __MAYO_FORCE_RELAY__?: boolean;
   __MAYO_CORRUPT_FRAME__?: boolean;
   __MAYO_SINK__?: unknown;

@@ -56,12 +56,18 @@ test("the production policy carries no localhost signalling origin", async () =>
   expect(policy).toContain("connect-src 'self' wss://mayo.pizza");
 });
 
-test("the preview policy grants exactly the signalling origin the e2e suite uses", async () => {
+test("the preview policy grants exactly the signalling origins the e2e suite uses", async () => {
   const { buildHeaders } = await import("../../../infra/header-source.mjs");
   const preview = buildHeaders("preview");
   const policy = preview["Content-Security-Policy"];
 
-  expect(policy).toContain("connect-src 'self' ws://127.0.0.1:3100");
+  const connectSrc = policy
+    ?.split(";")
+    .find((directive) => directive.trim().startsWith("connect-src"))
+    ?.trim();
+  expect(connectSrc).toBe(
+    "connect-src 'self' ws://127.0.0.1:3100 ws://127.0.0.1:3101",
+  );
   // Production-only origins must not leak the other way either.
   expect(policy).not.toContain("wss://mayo.pizza");
 });

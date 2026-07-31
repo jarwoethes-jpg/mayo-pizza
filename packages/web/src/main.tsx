@@ -22,6 +22,11 @@ import {
   type TransferProgress,
   type TransferResult,
 } from "./net/transfer";
+import {
+  canSilentlyRemintRoom,
+  resolveRoomHeartbeatInterval,
+  startRoomHeartbeat,
+} from "./roomLifecycle";
 import { getSinkOverride, getSinkStrategy } from "./sink";
 import { getFailureCopy } from "./ui/copy";
 import { formatBytes, formatEta, formatTransferRate } from "./ui/format";
@@ -100,6 +105,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
   const [roomPassword, setRoomPassword] = useState<string | undefined>(
     undefined,
   );
+  const [roomGeneration, setRoomGeneration] = useState(0);
   const [passwordAttempt, setPasswordAttempt] = useState<string | undefined>(
     undefined,
   );
@@ -166,9 +172,23 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
   const dragDepthRef = useRef(0);
   const progressAnnouncedRef = useRef(false);
   const routeStatSentRef = useRef(false);
+  const stagedSelectionRef = useRef(stagedSelection);
+  const transferPhaseRef = useRef(transferUi.phase);
+  const peerAttachedRef = useRef(false);
+  const automaticRoomRemintCountRef = useRef(0);
+  const silentRoomRemintPendingRef = useRef(false);
+  stagedSelectionRef.current = stagedSelection;
+  transferPhaseRef.current = transferUi.phase;
 
+  // WHY: roomGeneration is an explicit lifecycle reset after an invisible room expiry.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: roomGeneration intentionally restarts the room lifecycle.
   useEffect(() => {
     routeStatSentRef.current = false;
+    connectionStateRef.current = "new";
+    peerAttachedRef.current = false;
+    silentRoomRemintPendingRef.current = false;
+    let active = true;
+    let stopRoomHeartbeat = (): void => {};
     const signaling = createSignalingClient();
     const peer = createPeer(role, signaling);
     const transfer = createTransferController(role, peer, {
@@ -225,6 +245,9 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
         setLog("Connection’s back. Resuming your slice…");
       },
       onError: (error) => {
+        if (silentRoomRemintPendingRef.current) {
+          return;
+        }
         resumePendingRef.current = false;
         setSessionStatus("failed");
         setSessionFailureReason(error.message);
@@ -244,6 +267,12 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     });
     peerRef.current = peer;
     transferRef.current = transfer;
+    const unsubscribePeerJoined = signaling.on("peer-joined", () => {
+      peerAttachedRef.current = true;
+    });
+    const unsubscribePeerLeft = signaling.on("peer-left", () => {
+      peerAttachedRef.current = false;
+    });
 
     const sendAutoPing = (): void => {
       if (
@@ -323,6 +352,9 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       setLog("Connection’s back. Resuming your slice…");
     });
     const unsubscribeExhausted = peer.on("exhausted", ({ error }) => {
+      if (silentRoomRemintPendingRef.current) {
+        return;
+      }
       resumePendingRef.current = false;
       setSessionStatus("failed");
       const reason = error?.message ?? "connection recovery exhausted";
@@ -348,8 +380,38 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       setLastPong(nonce);
       setLog("Pong received.");
     });
+    const handleExpiredRoom = (): boolean => {
+      if (silentRoomRemintPendingRef.current) {
+        return true;
+      }
+      const transferInProgress =
+        transferPhaseRef.current === "staged" ||
+        transferPhaseRef.current === "transferring";
+      const canRemint = canSilentlyRemintRoom(
+        role,
+        stagedSelectionRef.current !== undefined,
+        peerAttachedRef.current || connectionStateRef.current === "connected",
+        transferInProgress,
+        automaticRoomRemintCountRef.current,
+      );
+      if (!canRemint) {
+        return false;
+      }
+      automaticRoomRemintCountRef.current += 1;
+      setSessionStatus("connecting");
+      setSessionFailureReason(undefined);
+      setSessionNotice(undefined);
+      setAnnouncement(getSessionCopy("connecting", role));
+      setLog("Starting signaling…");
+      silentRoomRemintPendingRef.current = true;
+      setRoomGeneration((generation) => generation + 1);
+      return true;
+    };
     const unsubscribeError = peer.on("error", ({ error }) => {
       if (error.message.startsWith("BAD_SLUG:")) {
+        if (handleExpiredRoom()) {
+          return;
+        }
         setSessionStatus("failed");
         setSessionFailureReason(error.message);
         setAnnouncement(getFailureCopy(error.message, role).message);
@@ -366,12 +428,26 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
 
     const run = async (): Promise<void> => {
       try {
+        const heartbeatInterval = resolveRoomHeartbeatInterval(
+          window.__MAYO_HEARTBEAT_INTERVAL_MS__,
+        );
         const authenticationPassword =
           role === "uploader" ? roomPassword : passwordAttempt;
         if (role === "uploader") {
           const created = await signaling.create(authenticationPassword);
           setRoomSlug(created.slug);
           setLog("Room created. Waiting for a receiver…");
+          if (active) {
+            stopRoomHeartbeat = startRoomHeartbeat(
+              () => signaling.isOpen,
+              async () => {
+                await signaling.requestIceConfig();
+              },
+              undefined,
+              undefined,
+              heartbeatInterval,
+            );
+          }
         } else if (slug !== undefined) {
           await signaling.join(slug, authenticationPassword);
           setPasswordPromptState(undefined);
@@ -422,6 +498,8 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     void run();
 
     return () => {
+      active = false;
+      stopRoomHeartbeat();
       unsubscribeConnection();
       unsubscribeIce();
       unsubscribeCtrl();
@@ -432,6 +510,8 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       unsubscribePeerGone();
       unsubscribePong();
       unsubscribeError();
+      unsubscribePeerJoined();
+      unsubscribePeerLeft();
       if (window.__MAYO_DEBUG_DROP__ === debugDrop) {
         delete window.__MAYO_DEBUG_DROP__;
       }
@@ -441,7 +521,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       peerRef.current = undefined;
       transferRef.current = undefined;
     };
-  }, [passwordAttempt, role, roomPassword, slug]);
+  }, [passwordAttempt, role, roomGeneration, roomPassword, slug]);
 
   const sendPing = (): void => {
     const peer = peerRef.current;
@@ -486,12 +566,14 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     const files = collection.entries.filter(
       (entry) => entry.file !== undefined,
     );
-    setStagedSelection({
+    const selection: StagedSelection = {
       kind: "folder",
       name: `${collection.rootName}.zip`,
       size: files.reduce((total, entry) => total + (entry.file?.size ?? 0), 0),
       fileCount: files.length,
-    });
+    };
+    stagedSelectionRef.current = selection;
+    setStagedSelection(selection);
     resetTransferPresentation();
     setSkippedCount(collection.skippedCount);
     setAnnouncement(
@@ -515,7 +597,13 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     if (transferRef.current === undefined) {
       return;
     }
-    setStagedSelection({ kind: "file", name: file.name, size: file.size });
+    const selection: StagedSelection = {
+      kind: "file",
+      name: file.name,
+      size: file.size,
+    };
+    stagedSelectionRef.current = selection;
+    setStagedSelection(selection);
     resetTransferPresentation();
     setSkippedCount(undefined);
     setAnnouncement(`Nice slice! ${file.name} is staged and ready to travel.`);
@@ -695,6 +783,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       return;
     }
     const nextPassword = normalizeRoomPassword(passwordDraft);
+    automaticRoomRemintCountRef.current = 0;
     setRoomPassword(nextPassword);
     setPasswordDraft(nextPassword ?? "");
     setAnnouncement(
