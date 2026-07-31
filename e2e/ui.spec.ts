@@ -56,6 +56,12 @@ const expectA11y = async (page: Page, state: string): Promise<void> => {
 // element painted --mp-on-accent whose background is fully transparent — i.e.
 // dark text inheriting a dark surface.
 //
+// The effective background matters here: the QR plate is a light island, and
+// --mp-on-accent and --mp-bg resolve to the same value, so a legitimate dark
+// caption on the plate is indistinguishable from an unfilled accent label by
+// colour alone. Do not re-word this as a light-or-dark specific check — it is
+// deliberately expressed against the token, not a literal.
+//
 // The previous gold/purple arms are gone with those tokens. Retargeting them
 // verbatim would have been actively harmful: --mp-purple no longer resolves, so
 // getPropertyValue returns "" and the probe would inherit an arbitrary colour,
@@ -72,18 +78,53 @@ const contrastAudit = async (page: Page): Promise<void> => {
       return resolved;
     };
     const onAccent = resolveColor(root.getPropertyValue("--mp-on-accent"));
+    const qrPlate = resolveColor(root.getPropertyValue("--mp-qr-plate"));
+    const isOpaqueBackground = (backgroundColor: string): boolean => {
+      if (backgroundColor.startsWith("rgba(")) {
+        const alpha = Number(
+          backgroundColor.slice(backgroundColor.lastIndexOf(",") + 1, -1),
+        );
+        return alpha === 1;
+      }
+      return backgroundColor.startsWith("rgb(");
+    };
+    const effectiveBackground = (element: HTMLElement): string | null => {
+      let ancestor = element.parentElement;
+      while (ancestor) {
+        const backgroundColor = getComputedStyle(ancestor).backgroundColor;
+        if (isOpaqueBackground(backgroundColor)) {
+          return backgroundColor;
+        }
+        ancestor = ancestor.parentElement;
+      }
+      return null;
+    };
     const found: string[] = [];
     for (const element of Array.from(
       document.querySelectorAll<HTMLElement>("*"),
     )) {
       const styles = getComputedStyle(element);
+      // The sr-only file input lives inside the primary label and inherits its
+      // colour, but it is clipped to a 1px box and paints no glyphs, so it
+      // cannot carry a contrast hazard. Skip anything that renders no visible
+      // text area; everything a user can actually see is still audited.
+      const rect = element.getBoundingClientRect();
+      const paintsNothing =
+        styles.clipPath !== "none" ||
+        styles.visibility === "hidden" ||
+        styles.opacity === "0" ||
+        rect.width <= 1 ||
+        rect.height <= 1;
       if (
+        !paintsNothing &&
         styles.color === onAccent &&
         styles.backgroundColor === "rgba(0, 0, 0, 0)"
       ) {
-        found.push(
-          `dark label with no accent fill behind it: ${element.tagName.toLowerCase()}`,
-        );
+        if (effectiveBackground(element) !== qrPlate) {
+          found.push(
+            `dark label with no accent fill behind it: ${element.tagName.toLowerCase()}`,
+          );
+        }
       }
     }
     return found;

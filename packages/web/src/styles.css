@@ -415,6 +415,12 @@ input[type="checkbox"] {
   padding: 0.75rem;
 }
 
+/* The dark-card dim token measures 2.1:1 on the light QR plate;
+   --mp-bg measures ~15.7:1 there and keeps the caption readable. */
+.qr-wrap .muted {
+  color: var(--mp-bg);
+}
+
 .qr-wrap svg {
   display: block;
   width: 100%;
