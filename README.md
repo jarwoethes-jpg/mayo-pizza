@@ -115,7 +115,7 @@ Before first boot:
 
 - Create DNS A and/or AAAA records for `mayo.pizza` pointing to the host, plus a DNS-only A record for `turn.mayo.pizza` pointing to the same host.
 - If Cloudflare fronts the name, use DNS-only / the grey cloud. Caddy's ACME HTTP challenge must reach the host directly, and WebRTC/TURN traffic must not be sent through Cloudflare's HTTP proxy.
-- Make ports 80 and 443 reachable by Caddy; TURNS needs no new port because it rides 443. Expose the TURN listener and relay range required by `infra/docker-compose.yml` (TCP/UDP 3478 and UDP 49160–49200).
+- Make ports 80 and 443 reachable by Caddy; TURNS needs no new port because it rides 443. Expose the TURN listener and relay range required by `infra/docker-compose.yml` (TCP/UDP 3478 and UDP 49160–49400).
 - Set `TURN_STATIC_SECRET` and `METRICS_TOKEN` as Portainer stack environment values. Keep both out of git. Change the hostname/ICE values only when the DNS and firewall plan also changes.
 
 Validate interpolation before deploying:
@@ -179,11 +179,11 @@ sudo iptables -L -v -n -x
 
 Use the active firewall stack's existing TURN allow chain. Add only a narrowly scoped rule for port 9641 that permits localhost or the scraper's address, and persist it; for accounting, persist counter-only rules as needed. Do not add an unreviewed broad `ACCEPT` rule. The exact firewall rule/persistence command is host-specific and must be verified on the host.
 
-Scrape coturn locally and alert on the month-to-date delta of `turn_total_traffic_sentb` plus `turn_total_traffic_rcvb` against the monthly byte budget. These counters describe bytes from finished sessions, so bytes from a still-open relay session are not counted until that session ends. A single transfer can hold an allocation for many minutes; a byte-rate alert built on these counters therefore lags behind live traffic and is not real-time. `turn_total_allocations` is a gauge of current allocations despite its name, not a cumulative total; compare it with the checked-in `total-quota=100` to alert on saturation.
+Scrape coturn locally and alert on the month-to-date delta of `turn_total_traffic_sentb` plus `turn_total_traffic_rcvb` against the monthly byte budget. These counters describe bytes from finished sessions, so bytes from a still-open relay session are not counted until that session ends. A single transfer can hold an allocation for many minutes; a byte-rate alert built on these counters therefore lags behind live traffic and is not real-time. `turn_total_allocations` is a gauge of current allocations despite its name, not a cumulative total; compare it with the checked-in `total-quota=100` to alert on saturation. The relay port range must exceed `total-quota` for the quota to be the real ceiling; otherwise the available ports become the lower limit.
 
 On a fresh server with no traffic, the endpoint emits all 26 `# HELP`/`# TYPE` declarations but sample values for only the 6 `process_*` metrics. Every `turn_*` and `stun_*` series is absent until a session produces data. Alert rules must distinguish no data from zero and tolerate an absent series, for example with an `or vector(0)` fallback, rather than treating absence as a healthy zero.
 
-Host firewall byte counters remain the only way to see live in-flight relay traffic given that lag. Inspect and poll counters for TCP/UDP 3478 and UDP relay ports 49160–49200, then alert on the measured byte-rate or cost budget. Prometheus metrics and host firewall accounting are complementary methods.
+Host firewall byte counters remain the only way to see live in-flight relay traffic given that lag. Inspect and poll counters for TCP/UDP 3478 and UDP relay ports 49160–49400, then alert on the measured byte-rate or cost budget. Prometheus metrics and host firewall accounting are complementary methods.
 
 The checked-in `turnserver.conf` uses `total-quota=100` and deliberately sets no bandwidth rate cap: a rate cap does not bound monthly volume, so alerting is the control. Do not add `bps-capacity` on its own; coturn requires `max-bps` alongside it and refuses to start otherwise. The option names and Prometheus options used here are verified against the pinned `coturn/coturn:4.6.2` image.
 
