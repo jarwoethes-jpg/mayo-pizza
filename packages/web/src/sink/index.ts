@@ -9,6 +9,7 @@ export interface Sink {
   write(bytes: Uint8Array): Promise<void> | void;
   close(): Promise<void> | void;
   cancel(reason: string): Promise<void> | void;
+  isResponsive?(): boolean;
 }
 
 export type SinkFactory = (
@@ -147,8 +148,11 @@ export const createSink = (
 export { BLOB_MAX_BYTES, createBlobSink } from "./blob";
 export {
   SINK_QUEUE_HIGH_WATERMARK,
-  SINK_WRITE_TIMEOUT_MS,
+  SINK_STALL_ABORT_MS,
+  SINK_STALL_NOTICE_MS,
   SinkManager,
+  type SinkManagerOptions,
+  type SinkStall,
 } from "./manager";
 export {
   consumeSwCredit,

@@ -1,7 +1,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { predictLength } from "client-zip";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeZipPlan } from "../src/folder/zipPlan";
 import type { DataChannelPumpTarget } from "../src/net/transfer";
 import {
@@ -11,6 +11,11 @@ import {
   splitBuffer,
   WatermarkFramePump,
 } from "../src/net/transfer";
+import { SINK_PROGRESS_WATCHDOG_MS, SINK_STALL_NOTICE_MS } from "../src/sink";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 class FakeDataChannel implements DataChannelPumpTarget {
   public bufferedAmount = 0;
@@ -172,6 +177,107 @@ const createChannelReadinessPeer = () => {
   };
 
   return { ctrlHandlers, openNewGeneration, peer, sent };
+};
+
+interface ReceiverStallHarness {
+  controller: ReturnType<typeof createTransferController>;
+  emitWorkerDone: () => void;
+  onError: ReturnType<typeof vi.fn>;
+  onSinkStall: ReturnType<typeof vi.fn>;
+  resolveWrite: (() => void) | undefined;
+}
+
+const createReceiverStallHarness = async (): Promise<ReceiverStallHarness> => {
+  const ctrlHandlers = new Map<string, (message: unknown) => void>();
+  let dataMessage: ((event: MessageEvent<unknown>) => void) | undefined;
+  let resolveWrite: (() => void) | undefined;
+  const onError = vi.fn();
+  const onSinkStall = vi.fn();
+  const worker = {
+    onmessage: null as ((event: MessageEvent<unknown>) => void) | null,
+    onerror: null as ((event: ErrorEvent) => void) | null,
+    postMessage: vi.fn(),
+    terminate: vi.fn(),
+  };
+  const data = {
+    readyState: "open",
+    bufferedAmount: 0,
+    send: vi.fn(),
+    addEventListener: vi.fn((type: string, listener: unknown) => {
+      if (type === "message") {
+        dataMessage = listener as (event: MessageEvent<unknown>) => void;
+      }
+    }),
+    removeEventListener: vi.fn(),
+  };
+  const peer = {
+    ctrl: { readyState: "open", send: vi.fn() },
+    data,
+    maxMessageSize: undefined,
+    on: () => () => false,
+    onCtrl: (type: string, handler: (message: unknown) => void) => {
+      ctrlHandlers.set(type, handler);
+      return () => ctrlHandlers.delete(type);
+    },
+  };
+  const manifest = {
+    t: "manifest" as const,
+    transferId: "transfer-stall-watchdog",
+    mode: "single" as const,
+    items: [{ path: "file.bin", size: 4, lastModified: 0 }],
+    totalBytes: 4,
+    suggestedName: "file.bin",
+  };
+  const controller = createTransferController("downloader", peer as never, {
+    onError,
+    onSinkStall,
+    receiverWorkerFactory: () => worker,
+    sinkFactory: () => ({
+      strategy: "null" as const,
+      write: () =>
+        new Promise<void>((resolve) => {
+          resolveWrite = resolve;
+        }),
+      close: vi.fn(),
+      cancel: vi.fn(),
+    }),
+  });
+
+  ctrlHandlers.get("manifest")?.(manifest);
+  controller.acceptTransfer();
+  await Promise.resolve();
+  ctrlHandlers.get("start")?.({
+    t: "start",
+    transferId: manifest.transferId,
+    offset: 0,
+  });
+  ctrlHandlers.get("done")?.({
+    t: "done",
+    transferId: manifest.transferId,
+    sha256: "hash",
+  });
+  dataMessage?.({ data: new ArrayBuffer(4) } as MessageEvent<unknown>);
+  worker.onmessage?.({
+    data: {
+      t: "chunk",
+      chunkId: "0",
+      buffer: new ArrayBuffer(4),
+      bytesDone: 4,
+      totalBytes: 4,
+    },
+  } as MessageEvent<unknown>);
+
+  return {
+    controller,
+    emitWorkerDone: () => {
+      worker.onmessage?.({
+        data: { t: "done", bytesDone: 4, sha256: "hash" },
+      } as MessageEvent<unknown>);
+    },
+    onError,
+    onSinkStall,
+    resolveWrite,
+  };
 };
 
 describe("transfer channel readiness", () => {
@@ -1024,5 +1130,54 @@ describe("transfer cancellation", () => {
       }),
     );
     controller.destroy();
+  });
+});
+
+describe("receiver sink stall watchdog", () => {
+  it("does not fail a finishing transfer while the sink is stalled", async () => {
+    vi.useFakeTimers();
+    const harness = await createReceiverStallHarness();
+    const watchdogError =
+      "The receiver sink stopped making progress while the transfer was finishing.";
+
+    await vi.advanceTimersByTimeAsync(SINK_STALL_NOTICE_MS);
+    harness.emitWorkerDone();
+    await vi.advanceTimersByTimeAsync(SINK_PROGRESS_WATCHDOG_MS + 1);
+
+    expect(harness.onError).not.toHaveBeenCalledWith(
+      expect.objectContaining({ message: watchdogError }),
+    );
+    harness.controller.destroy();
+  });
+
+  it("re-arms the finishing watchdog after the sink recovers", async () => {
+    vi.useFakeTimers();
+    const harness = await createReceiverStallHarness();
+    const watchdogError =
+      "The receiver sink stopped making progress while the transfer was finishing.";
+
+    await vi.advanceTimersByTimeAsync(SINK_STALL_NOTICE_MS);
+    harness.emitWorkerDone();
+    await vi.advanceTimersByTimeAsync(SINK_PROGRESS_WATCHDOG_MS + 1);
+    expect(harness.onError).not.toHaveBeenCalledWith(
+      expect.objectContaining({ message: watchdogError }),
+    );
+
+    harness.resolveWrite?.();
+    await Promise.resolve();
+    expect(harness.onSinkStall).toHaveBeenCalledWith({
+      stalled: true,
+      sinceMs: expect.any(Number),
+    });
+    expect(harness.onSinkStall).toHaveBeenCalledWith({
+      stalled: false,
+      sinceMs: expect.any(Number),
+    });
+
+    vi.advanceTimersByTime(SINK_PROGRESS_WATCHDOG_MS);
+    expect(harness.onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: watchdogError }),
+    );
+    harness.controller.destroy();
   });
 });

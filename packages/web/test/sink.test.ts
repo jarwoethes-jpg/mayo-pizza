@@ -11,7 +11,8 @@ import {
   isNextSwSequence,
   releaseSwCredit,
   SINK_PROGRESS_WATCHDOG_MS,
-  SINK_WRITE_TIMEOUT_MS,
+  SINK_STALL_ABORT_MS,
+  SINK_STALL_NOTICE_MS,
   SinkManager,
   SwStreamSink,
 } from "../src/sink";
@@ -105,23 +106,113 @@ describe("bounded sink manager", () => {
     resolveWrite?.();
   });
 
-  it("fails a stuck write instead of hanging forever", async () => {
+  it("reports a stalled write without rejecting or poisoning the manager", async () => {
     vi.useFakeTimers();
-    try {
-      const sink = {
-        strategy: "null" as const,
-        write: () => new Promise<void>(() => {}),
-        close: vi.fn(),
-        cancel: vi.fn(),
-      };
-      const manager = new SinkManager(sink);
-      const write = manager.write(new Uint8Array([1]));
-      const rejection = expect(write).rejects.toThrow(/stopped responding/i);
-      await vi.advanceTimersByTimeAsync(SINK_WRITE_TIMEOUT_MS);
-      await rejection;
-    } finally {
-      vi.useRealTimers();
-    }
+    let resolveFirstWrite: (() => void) | undefined;
+    let writeCount = 0;
+    const sink = {
+      strategy: "null" as const,
+      write: () => {
+        writeCount += 1;
+        return writeCount === 1
+          ? new Promise<void>((resolve) => {
+              resolveFirstWrite = resolve;
+            })
+          : Promise.resolve();
+      },
+      close: vi.fn(),
+      cancel: vi.fn(),
+    };
+    const stalls: Array<{ stalled: boolean; sinceMs: number } | undefined> = [];
+    const manager = new SinkManager(sink, {
+      onStallChange: (stall) => stalls.push(stall),
+    });
+    const write = manager.write(new Uint8Array([1]));
+
+    await vi.advanceTimersByTimeAsync(SINK_STALL_NOTICE_MS);
+    expect(stalls[0]?.stalled).toBe(true);
+    let settled = false;
+    void write.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    resolveFirstWrite?.();
+    await expect(write).resolves.toBeUndefined();
+    expect(stalls[1]?.stalled).toBe(false);
+
+    await expect(manager.write(new Uint8Array([2]))).resolves.toBeUndefined();
+  });
+
+  it("fails a stalled write at the ceiling with the responsive message", async () => {
+    vi.useFakeTimers();
+    const sink = {
+      strategy: "null" as const,
+      write: () => new Promise<void>(() => {}),
+      close: vi.fn(),
+      cancel: vi.fn(),
+      isResponsive: () => true,
+    };
+    const manager = new SinkManager(sink);
+    const write = manager.write(new Uint8Array([1]));
+
+    await vi.advanceTimersByTimeAsync(SINK_STALL_NOTICE_MS);
+    const rejection = expect(write).rejects.toThrow(
+      "The download has been paused for too long. Your browser stopped accepting data.",
+    );
+    await vi.advanceTimersByTimeAsync(
+      SINK_STALL_ABORT_MS - SINK_STALL_NOTICE_MS,
+    );
+    await rejection;
+  });
+
+  it("fails a stalled write at the ceiling with the unresponsive message", async () => {
+    vi.useFakeTimers();
+    const sink = {
+      strategy: "null" as const,
+      write: () => new Promise<void>(() => {}),
+      close: vi.fn(),
+      cancel: vi.fn(),
+      isResponsive: () => false,
+    };
+    const manager = new SinkManager(sink);
+    const write = manager.write(new Uint8Array([1]));
+
+    await vi.advanceTimersByTimeAsync(SINK_STALL_NOTICE_MS);
+    const rejection = expect(write).rejects.toThrow(
+      "The download service worker stopped responding.",
+    );
+    await vi.advanceTimersByTimeAsync(
+      SINK_STALL_ABORT_MS - SINK_STALL_NOTICE_MS,
+    );
+    await rejection;
+  });
+
+  it("treats a sink without liveness as unknown at the ceiling", async () => {
+    vi.useFakeTimers();
+    const sink = {
+      strategy: "null" as const,
+      write: () => new Promise<void>(() => {}),
+      close: vi.fn(),
+      cancel: vi.fn(),
+    };
+    const manager = new SinkManager(sink);
+    const write = manager.write(new Uint8Array([1]));
+
+    await vi.advanceTimersByTimeAsync(SINK_STALL_NOTICE_MS);
+    const rejection = expect(write).rejects.toThrow(
+      "The download has been paused for too long. Your browser stopped accepting data.",
+    );
+    await vi.advanceTimersByTimeAsync(
+      SINK_STALL_ABORT_MS - SINK_STALL_NOTICE_MS,
+    );
+    await rejection;
   });
 });
 
@@ -203,14 +294,30 @@ describe("service-worker close watchdog", () => {
     await expect(closed).resolves.toBeUndefined();
   });
 
-  it("fails a silent close once the progress watchdog trips", async () => {
+  it("fails a silent close once the stall ceiling trips", async () => {
     vi.useFakeTimers();
     const harness = await createSwSinkHarness();
     const closed = harness.sink.close();
 
     const failure = expect(closed).rejects.toThrow(/stopped responding/i);
-    await vi.advanceTimersByTimeAsync(SINK_PROGRESS_WATCHDOG_MS);
+    await vi.advanceTimersByTimeAsync(SINK_STALL_ABORT_MS);
     await failure;
+  });
+
+  it("records pong liveness with startup grace", async () => {
+    vi.useFakeTimers();
+    const harness = await createSwSinkHarness();
+
+    expect(harness.sink.isResponsive()).toBe(true);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(harness.sink.isResponsive()).toBe(false);
+
+    harness.sendMessage({ t: "pong" });
+    expect(harness.sink.isResponsive()).toBe(true);
+    await vi.advanceTimersByTimeAsync(44_999);
+    expect(harness.sink.isResponsive()).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(harness.sink.isResponsive()).toBe(false);
   });
 });
 

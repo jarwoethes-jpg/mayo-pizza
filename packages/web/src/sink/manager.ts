@@ -1,7 +1,18 @@
 import type { Sink } from "./index";
 
 export const SINK_QUEUE_HIGH_WATERMARK = 8 * 1024 * 1024;
-export const SINK_WRITE_TIMEOUT_MS = 30_000;
+export const SINK_STALL_NOTICE_MS = 30_000;
+export const SINK_STALL_ABORT_MS = 600_000;
+
+export interface SinkStall {
+  stalled: boolean;
+  sinceMs: number;
+}
+
+export interface SinkManagerOptions {
+  highWatermark?: number;
+  onStallChange?: (stall: SinkStall | undefined) => void;
+}
 
 interface PendingWrite {
   bytes: Uint8Array;
@@ -32,9 +43,13 @@ const withTimeout = async <T>(
   }
 };
 
-/** Serializes sink writes and converts a stuck or failed write into a transfer error. */
+/** Serializes sink writes and makes prolonged backpressure observable and bounded. */
 export class SinkManager {
   private readonly queue: PendingWrite[] = [];
+  private readonly highWatermark: number;
+  private readonly onStallChange:
+    | ((stall: SinkStall | undefined) => void)
+    | undefined;
   private queuedBytes = 0;
   private active: PendingWrite | undefined;
   private processing = false;
@@ -44,11 +59,25 @@ export class SinkManager {
   private rejectClose: ((reason: unknown) => void) | undefined;
   private failure: Error | undefined;
   private cancelled = false;
+  private stallNoticeTimer:
+    | ReturnType<typeof globalThis.setTimeout>
+    | undefined;
+  private stallAbortTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
+  private stalledSinceMs: number | undefined;
 
   public constructor(
     private readonly sink: Sink,
-    private readonly highWatermark = SINK_QUEUE_HIGH_WATERMARK,
-  ) {}
+    highWatermarkOrOptions: number | SinkManagerOptions = {},
+  ) {
+    if (typeof highWatermarkOrOptions === "number") {
+      this.highWatermark = highWatermarkOrOptions;
+      this.onStallChange = undefined;
+    } else {
+      this.highWatermark =
+        highWatermarkOrOptions.highWatermark ?? SINK_QUEUE_HIGH_WATERMARK;
+      this.onStallChange = highWatermarkOrOptions.onStallChange;
+    }
+  }
 
   public write(bytes: Uint8Array): Promise<void> {
     // A network drop does not cancel this queue: the peer generation can be
@@ -102,6 +131,8 @@ export class SinkManager {
     this.cancelled = true;
     const error = new Error(reason);
     this.failure = error;
+    this.clearWriteTimers();
+    this.onStallChange?.(undefined);
     for (const pending of this.queue.splice(0)) {
       pending.reject(error);
     }
@@ -125,11 +156,9 @@ export class SinkManager {
     this.queuedBytes -= next.bytes.byteLength;
     this.active = next;
     this.processing = true;
+    this.armWriteTimers(next);
     try {
-      await withTimeout(
-        Promise.resolve(this.sink.write(next.bytes)),
-        SINK_WRITE_TIMEOUT_MS,
-      );
+      await Promise.resolve(this.sink.write(next.bytes));
       if (!this.cancelled && this.failure === undefined) {
         next.resolve();
       }
@@ -138,6 +167,7 @@ export class SinkManager {
       next.reject(sinkError);
       this.fail(sinkError);
     } finally {
+      this.clearWriteTimers(true);
       this.active = undefined;
       this.processing = false;
       void this.processNext();
@@ -158,7 +188,7 @@ export class SinkManager {
     const rejectClose = this.rejectClose;
     this.resolveClose = undefined;
     this.rejectClose = undefined;
-    void withTimeout(Promise.resolve(this.sink.close()), SINK_WRITE_TIMEOUT_MS)
+    void withTimeout(Promise.resolve(this.sink.close()), SINK_STALL_ABORT_MS)
       .then(resolveClose)
       .catch((error: unknown) => {
         const sinkError = asError(error);
@@ -172,6 +202,8 @@ export class SinkManager {
       return;
     }
     this.failure = error;
+    this.clearWriteTimers();
+    this.onStallChange?.(undefined);
     for (const pending of this.queue.splice(0)) {
       pending.reject(error);
     }
@@ -179,5 +211,55 @@ export class SinkManager {
     this.rejectClose?.(error);
     this.resolveClose = undefined;
     this.rejectClose = undefined;
+  }
+
+  private armWriteTimers(pending: PendingWrite): void {
+    this.clearWriteTimers();
+    this.stallNoticeTimer = globalThis.setTimeout(() => {
+      if (
+        this.active !== pending ||
+        this.cancelled ||
+        this.failure !== undefined
+      ) {
+        return;
+      }
+      const sinceMs = Date.now();
+      this.stalledSinceMs = sinceMs;
+      this.onStallChange?.({ stalled: true, sinceMs });
+    }, SINK_STALL_NOTICE_MS);
+    this.stallAbortTimer = globalThis.setTimeout(() => {
+      if (
+        this.active !== pending ||
+        this.cancelled ||
+        this.failure !== undefined
+      ) {
+        return;
+      }
+      const message =
+        this.sink.isResponsive?.() === false
+          ? "The download service worker stopped responding."
+          : "The download has been paused for too long. Your browser stopped accepting data.";
+      const error = new Error(message);
+      pending.reject(error);
+      this.fail(error);
+    }, SINK_STALL_ABORT_MS);
+  }
+
+  private clearWriteTimers(reportRecovery = false): void {
+    if (this.stallNoticeTimer !== undefined) {
+      globalThis.clearTimeout(this.stallNoticeTimer);
+      this.stallNoticeTimer = undefined;
+    }
+    if (this.stallAbortTimer !== undefined) {
+      globalThis.clearTimeout(this.stallAbortTimer);
+      this.stallAbortTimer = undefined;
+    }
+    if (this.stalledSinceMs !== undefined) {
+      const sinceMs = this.stalledSinceMs;
+      this.stalledSinceMs = undefined;
+      if (reportRecovery) {
+        this.onStallChange?.({ stalled: false, sinceMs });
+      }
+    }
   }
 }

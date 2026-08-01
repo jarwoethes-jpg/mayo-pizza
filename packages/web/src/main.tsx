@@ -152,6 +152,9 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
   const [transferProgress, setTransferProgress] = useState<
     TransferProgress | undefined
   >(undefined);
+  const [sinkStall, setSinkStall] = useState<
+    { stalled: boolean; sinceMs: number } | undefined
+  >(undefined);
   const [transferResult, setTransferResult] = useState<
     TransferResult | undefined
   >(undefined);
@@ -238,6 +241,13 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
           resumePendingRef.current = false;
           setSessionStatus("connected");
           setSessionNotice(undefined);
+        }
+      },
+      onSinkStall: (stall) => {
+        setSinkStall(stall);
+        if (stall?.stalled) {
+          setAnnouncement("Waiting for your browser's download to continue…");
+          setLog("Download paused while the browser accepts data.");
         }
       },
       onManifest: (manifest) => {
@@ -641,6 +651,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
 
   const resetTransferPresentation = (): void => {
     setTransferProgress(undefined);
+    setSinkStall(undefined);
     setTransferResult(undefined);
     dispatchTransferUi({ type: "reset" });
     progressAnnouncedRef.current = false;
@@ -1338,6 +1349,19 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
                   </span>
                 </div>
               </section>
+            )}
+
+          {role === "downloader" &&
+            passwordPromptState === undefined &&
+            sinkStall?.stalled && (
+              <p
+                className="status-banner mt-6"
+                data-testid="sink-stall-warning"
+                role="status"
+              >
+                <span className="status-banner__label">Download paused</span>
+                <span>Waiting for your browser's download to continue…</span>
+              </p>
             )}
 
           {passwordPromptState === undefined &&

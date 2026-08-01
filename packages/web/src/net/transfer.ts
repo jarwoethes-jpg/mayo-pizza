@@ -8,6 +8,7 @@ import {
   type Sink,
   type SinkFactory,
   SinkManager,
+  type SinkStall,
 } from "../sink";
 import type {
   ReceiverWorkerCommand,
@@ -47,6 +48,7 @@ export type TransferManifestInfo = Extract<TransferMessage, { t: "manifest" }>;
 export interface TransferControllerOptions {
   onManifest?: (manifestInfo: TransferManifestInfo) => void;
   onProgress?: (progress: TransferProgress) => void;
+  onSinkStall?: (stall: SinkStall | undefined) => void;
   onResult?: (result: TransferResult) => void;
   onError?: (error: Error) => void;
   onCancelled?: (reason: string) => void;
@@ -354,6 +356,7 @@ export class TransferController {
       }
     | undefined;
   private readonly receiverCommitPromises = new Set<Promise<void>>();
+  private receiverSinkStalled = false;
   private receiverCommitWatchdogTimer:
     | ReturnType<typeof globalThis.setTimeout>
     | undefined;
@@ -562,7 +565,9 @@ export class TransferController {
           return;
         }
         this.receiverAcceptPending = false;
-        this.receiverSinkManager = new SinkManager(sink);
+        this.receiverSinkManager = new SinkManager(sink, {
+          onStallChange: (stall) => this.handleSinkStall(stall),
+        });
         this.sendCtrl({
           t: "request",
           transferId,
@@ -1049,12 +1054,19 @@ export class TransferController {
   }
 
   private armReceiverCommitWatchdog(): void {
+    if (this.receiverSinkStalled) {
+      return;
+    }
     if (this.receiverCommitWatchdogTimer !== undefined) {
       globalThis.clearTimeout(this.receiverCommitWatchdogTimer);
     }
     this.receiverCommitWatchdogTimer = globalThis.setTimeout(() => {
       this.receiverCommitWatchdogTimer = undefined;
-      if (this.receiverDoneEvent !== undefined && !this.destroyed) {
+      if (
+        this.receiverDoneEvent !== undefined &&
+        !this.receiverSinkStalled &&
+        !this.destroyed
+      ) {
         this.fail(
           "The receiver sink stopped making progress while the transfer was finishing.",
         );
@@ -1066,6 +1078,21 @@ export class TransferController {
     if (this.receiverCommitWatchdogTimer !== undefined) {
       globalThis.clearTimeout(this.receiverCommitWatchdogTimer);
       this.receiverCommitWatchdogTimer = undefined;
+    }
+  }
+
+  private handleSinkStall(stall: SinkStall | undefined): void {
+    this.receiverSinkStalled = stall?.stalled === true;
+    this.options.onSinkStall?.(stall);
+    if (stall === undefined) {
+      return;
+    }
+    if (stall.stalled) {
+      this.clearReceiverCommitWatchdog();
+      return;
+    }
+    if (this.receiverDoneEvent !== undefined) {
+      this.armReceiverCommitWatchdog();
     }
   }
 
@@ -1313,6 +1340,8 @@ export class TransferController {
   private teardownActiveTransfer(): void {
     this.receiverSinkManager?.cancel("Transfer cancelled.");
     this.receiverSinkManager = undefined;
+    this.receiverSinkStalled = false;
+    this.options.onSinkStall?.(undefined);
     this.receiverAcceptPending = false;
     this.senderPump?.cancel();
     this.senderPump = undefined;

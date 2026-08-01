@@ -1,10 +1,12 @@
 import type { Sink } from "./index";
-import { SINK_PROGRESS_WATCHDOG_MS } from "./watchdog";
+import { SINK_STALL_ABORT_MS } from "./manager";
 
 export const DOWNLOAD_SERVICE_WORKER = "/download.sw.js";
 export const DOWNLOAD_PATH_PREFIX = "/__mayo-dl/";
 export const SW_CREDIT_BYTES = 8 * 1024 * 1024;
 const SW_MESSAGE_TIMEOUT_MS = 30_000;
+const SW_PING_INTERVAL_MS = 20_000;
+const SW_LIVENESS_TIMEOUT_MS = 45_000;
 
 export type SwPageMessage =
   | {
@@ -138,6 +140,10 @@ export class SwStreamSink implements Sink {
     }
     if (message.t === "error") {
       this.fail(new Error(message.message));
+      return;
+    }
+    if (message.t === "pong") {
+      this.lastPongAt = Date.now();
     }
   };
   private readonly serviceWorker: ServiceWorkerContainer;
@@ -150,6 +156,8 @@ export class SwStreamSink implements Sink {
   private failedError: Error | undefined;
   private iframe: HTMLIFrameElement | undefined;
   private pingTimer: number | undefined;
+  private lastPingAt: number | undefined;
+  private lastPongAt: number | undefined;
   private readyTimer: number | undefined;
   private resolveReady: (() => void) | undefined;
   private rejectReady: ((reason: unknown) => void) | undefined;
@@ -217,8 +225,20 @@ export class SwStreamSink implements Sink {
     document.body.append(iframe);
     this.iframe = iframe;
     this.pingTimer = window.setInterval(() => {
+      this.lastPingAt = Date.now();
       this.post({ t: "ping", id: this.id });
-    }, 20_000);
+    }, SW_PING_INTERVAL_MS);
+  }
+
+  /** Reports whether the service worker has answered its recent liveness pings. */
+  public isResponsive(): boolean {
+    if (this.lastPingAt === undefined) {
+      return true;
+    }
+    return (
+      this.lastPongAt !== undefined &&
+      Date.now() - this.lastPongAt < SW_LIVENESS_TIMEOUT_MS
+    );
   }
 
   public write(bytes: Uint8Array): Promise<void> {
@@ -345,7 +365,7 @@ export class SwStreamSink implements Sink {
           ),
         );
       }
-    }, SINK_PROGRESS_WATCHDOG_MS);
+    }, SINK_STALL_ABORT_MS);
   }
 
   private clearCloseWatchdog(): void {
