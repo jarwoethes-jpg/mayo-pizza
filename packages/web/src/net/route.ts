@@ -14,6 +14,7 @@ export interface SelectedRouteStats {
   availableOutgoingBitrate: number | undefined;
   bytesSent: number | undefined;
   bytesReceived: number | undefined;
+  timestamp: number | undefined;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -127,6 +128,7 @@ export const readSelectedRouteStats = (
     availableOutgoingBitrate: undefined,
     bytesSent: undefined,
     bytesReceived: undefined,
+    timestamp: undefined,
   };
   try {
     const selectedPair = findSelectedPair(stats);
@@ -145,6 +147,7 @@ export const readSelectedRouteStats = (
       availableOutgoingBitrate: readFiniteNumber(pair.availableOutgoingBitrate),
       bytesSent: readFiniteNumber(pair.bytesSent),
       bytesReceived: readFiniteNumber(pair.bytesReceived),
+      timestamp: readFiniteNumber(pair.timestamp),
     };
   } catch {
     return unavailable;

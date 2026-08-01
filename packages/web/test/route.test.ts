@@ -52,6 +52,7 @@ describe("selected WebRTC route", () => {
           availableOutgoingBitrate: 1_250_000,
           bytesSent: 100,
           bytesReceived: 200,
+          timestamp: 1_234.5,
         },
       ],
       [
@@ -82,7 +83,42 @@ describe("selected WebRTC route", () => {
       availableOutgoingBitrate: 1_250_000,
       bytesSent: 100,
       bytesReceived: 200,
+      timestamp: 1_234.5,
     });
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["NaN", Number.NaN],
+    ["infinite", Number.POSITIVE_INFINITY],
+  ])("leaves %s pair timestamps undefined", (_name, timestamp) => {
+    const pair: Record<string, unknown> = {
+      type: "candidate-pair",
+      state: "succeeded",
+      nominated: true,
+      localCandidateId: "local",
+      remoteCandidateId: "remote",
+    };
+    if (timestamp !== undefined) {
+      pair.timestamp = timestamp;
+    }
+    const stats = new Map([
+      ["pair", pair],
+      [
+        "local",
+        { id: "local", type: "local-candidate", candidateType: "host" },
+      ],
+      [
+        "remote",
+        {
+          id: "remote",
+          type: "remote-candidate",
+          candidateType: "host",
+        },
+      ],
+    ]);
+
+    expect(readSelectedRouteStats(stats).timestamp).toBeUndefined();
   });
 
   it("keeps unavailable pair details undefined", () => {
@@ -94,6 +130,7 @@ describe("selected WebRTC route", () => {
       availableOutgoingBitrate: undefined,
       bytesSent: undefined,
       bytesReceived: undefined,
+      timestamp: undefined,
     });
   });
 

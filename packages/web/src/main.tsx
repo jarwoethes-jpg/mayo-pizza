@@ -300,13 +300,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     const startStatsSampling = (): void => {
       stopStatsSampling();
       let sampling = true;
-      let previousSample:
-        | {
-            sampledAt: number;
-            bytesSent: number | undefined;
-            bytesReceived: number | undefined;
-          }
-        | undefined;
+      let recentSamples: Array<{ at: number; bytes: number }> = [];
 
       const sample = async (): Promise<void> => {
         try {
@@ -315,38 +309,46 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
             return;
           }
           const routeStats = readSelectedRouteStats(stats);
-          const sampledAt = Date.now();
           setSelectedRouteStats(routeStats);
           if (routeStats.route !== undefined) {
             setSelectedRoute(routeStats.route);
           }
-          if (previousSample !== undefined) {
-            const elapsedSeconds =
-              (sampledAt - previousSample.sampledAt) / 1000;
-            const deltas = [
-              routeStats.bytesSent !== undefined &&
-              previousSample.bytesSent !== undefined &&
-              routeStats.bytesSent >= previousSample.bytesSent
-                ? routeStats.bytesSent - previousSample.bytesSent
-                : undefined,
-              routeStats.bytesReceived !== undefined &&
-              previousSample.bytesReceived !== undefined &&
-              routeStats.bytesReceived >= previousSample.bytesReceived
-                ? routeStats.bytesReceived - previousSample.bytesReceived
-                : undefined,
-            ].filter((delta): delta is number => delta !== undefined);
-            if (elapsedSeconds > 0 && deltas.length > 0) {
-              setObservedRate(
-                deltas.reduce((total, delta) => total + delta, 0) /
-                  elapsedSeconds,
-              );
-            }
+          const byteCounters = [
+            routeStats.bytesSent,
+            routeStats.bytesReceived,
+          ].filter((bytes): bytes is number => bytes !== undefined);
+          if (byteCounters.length === 0) {
+            return;
           }
-          previousSample = {
-            sampledAt,
-            bytesSent: routeStats.bytesSent,
-            bytesReceived: routeStats.bytesReceived,
+          const currentSample = {
+            at: routeStats.timestamp ?? Date.now(),
+            bytes: byteCounters.reduce((total, bytes) => total + bytes, 0),
           };
+          const newestSample = recentSamples.at(-1);
+          if (
+            newestSample !== undefined &&
+            currentSample.bytes < newestSample.bytes
+          ) {
+            recentSamples = [currentSample];
+            setObservedRate(undefined);
+            return;
+          }
+          recentSamples.push(currentSample);
+          if (recentSamples.length > 4) {
+            recentSamples.shift();
+          }
+          if (recentSamples.length < 2) {
+            return;
+          }
+          const oldestSample = recentSamples[0];
+          if (oldestSample === undefined) {
+            return;
+          }
+          const elapsedSeconds = (currentSample.at - oldestSample.at) / 1000;
+          const byteDelta = currentSample.bytes - oldestSample.bytes;
+          if (byteDelta >= 0 && elapsedSeconds > 0) {
+            setObservedRate(byteDelta / elapsedSeconds);
+          }
         } catch {
           // Stats sampling is deliberately best-effort and never gates a transfer.
         }
