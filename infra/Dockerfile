@@ -30,7 +30,7 @@ ENV NODE_ENV=production
 ENV PORT=3000
 ENV WEB_ROOT=/app/web-dist
 
-RUN chown -R mayo:mayo /app
+RUN mkdir -p /app/state && chown -R mayo:mayo /app
 USER mayo
 
 EXPOSE 3000

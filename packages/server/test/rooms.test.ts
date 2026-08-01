@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   createRoomRegistry,
@@ -37,7 +38,10 @@ describe("pizza room registry", () => {
     registry.removePeer(room, "uploader-1");
 
     expect(registry.rooms.has(room.slug)).toBe(true);
-    expect(room.uploaderToken).toBe("token-1");
+    expect(room.uploaderTokenHash).toBe(
+      createHash("sha256").update("token-1").digest("hex"),
+    );
+    expect("uploaderToken" in room).toBe(false);
     expect(reapIdleRooms(registry, now + ROOM_TTL_MS + 1)).toBe(1);
     expect(registry.rooms.has(room.slug)).toBe(false);
   });

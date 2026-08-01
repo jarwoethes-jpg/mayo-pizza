@@ -18,6 +18,7 @@ import {
 } from "./ratelimit.js";
 import {
   createRoomRegistry,
+  hashUploaderToken,
   parseRoomTtlEnv,
   ROOM_AUTH_FAILURE_LIMIT,
   ROOM_TTL_MS,
@@ -335,8 +336,8 @@ const handleMessage = async (
     const suppliedToken = message.uploaderToken;
     const isUploaderRejoin = suppliedToken !== undefined;
     if (isUploaderRejoin) {
-      const expected = room.uploaderToken;
-      const supplied = Buffer.from(suppliedToken);
+      const expected = room.uploaderTokenHash;
+      const supplied = Buffer.from(hashUploaderToken(suppliedToken));
       const expectedBuffer =
         expected === undefined ? undefined : Buffer.from(expected);
       if (
@@ -667,6 +668,9 @@ export const createServer = (options: ServerOptions = {}): ServerHandle => {
     options.roomRegistry ??
     createRoomRegistry({
       ttlMs: parseRoomTtlEnv(process.env.ROOM_TTL_MS, ROOM_TTL_MS),
+      ...(process.env.ROOM_STATE_PATH === undefined
+        ? {}
+        : { statePath: process.env.ROOM_STATE_PATH }),
     });
   const previousReapHandler = rooms.onRoomReaped;
   rooms.onRoomReaped = (room, roomCount) => {

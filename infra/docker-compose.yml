@@ -24,6 +24,7 @@ services:
       RATE_LIMIT_JOIN: ${RATE_LIMIT_JOIN:-60}
       RATE_LIMIT_MESSAGE: ${RATE_LIMIT_MESSAGE:-100}
       ROOM_TTL_MS: ${ROOM_TTL_MS:-1800000}
+      ROOM_STATE_PATH: ${ROOM_STATE_PATH:-/app/state/rooms.json}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN must be set}
     healthcheck:
@@ -38,6 +39,8 @@ services:
         max-size: "10m"
         max-file: "7"
     restart: unless-stopped
+    volumes:
+      - room_state:/app/state
     # TRUSTED_PROXIES allowlists caddy by IP, so both addresses stay fixed and in agreement regardless of start order.
     networks:
       default:
@@ -92,6 +95,7 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  room_state:
 
 networks:
   default:

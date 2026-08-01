@@ -1,5 +1,6 @@
-import { randomInt } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 import WebSocket from "ws";
+import { createRoomStore, type RoomStore } from "./roomStore.js";
 
 const crustTerms = [
   "artisan",
@@ -176,7 +177,7 @@ export const generateSlug = (): string => {
 export interface Room {
   slug: string;
   uploaderId: string;
-  uploaderToken?: string;
+  uploaderTokenHash?: string;
   peers: Map<string, WebSocket>;
   passwordHash?: string;
   createdAt: number;
@@ -204,6 +205,7 @@ export interface RoomRegistry {
   recordTokenFailure: (room: Room, at?: number) => boolean;
   resetPasswordFailures: (room: Room) => void;
   resetTokenFailures: (room: Room) => void;
+  flush: () => void;
   onRoomReaped?: RoomReapedHandler;
   dispose: () => void;
 }
@@ -213,16 +215,29 @@ export interface RoomRegistryOptions {
   ttlMs?: number;
   intervalMs?: number;
   startReaper?: boolean;
+  statePath?: string;
+  roomStore?: RoomStore;
   onRoomReaped?: RoomReapedHandler;
 }
 
-/** Creates the in-memory room map and its idle-room reaper. */
+/** Hashes the uploader capability before it enters the room registry or snapshot. */
+export const hashUploaderToken = (token: string): string =>
+  createHash("sha256").update(token).digest("hex");
+
+/** Creates the room map, restoring its single-container snapshot when configured. */
 export const createRoomRegistry = (
   options: RoomRegistryOptions = {},
 ): RoomRegistry => {
-  const rooms = new Map<string, Room>();
   const now = options.now ?? Date.now;
   const ttlMs = options.ttlMs ?? ROOM_TTL_MS;
+  const roomStore =
+    options.roomStore ??
+    (options.statePath === undefined
+      ? undefined
+      : createRoomStore(options.statePath));
+  const rooms = new Map<string, Room>(
+    roomStore?.load(now(), ttlMs).map((room) => [room.slug, room] as const),
+  );
   const timer =
     options.startReaper === false
       ? undefined
@@ -255,9 +270,10 @@ export const createRoomRegistry = (
         room.passwordHash = passwordHash;
       }
       if (uploaderToken !== undefined) {
-        room.uploaderToken = uploaderToken;
+        room.uploaderTokenHash = hashUploaderToken(uploaderToken);
       }
       rooms.set(slug, room);
+      registry.flush();
       return room;
     },
     getRoom: (slug) => rooms.get(slug),
@@ -300,6 +316,9 @@ export const createRoomRegistry = (
     resetTokenFailures: (room) => {
       room.tokenFailures = 0;
     },
+    flush: () => {
+      roomStore?.flush(rooms.values());
+    },
     dispose: () => {
       if (timer !== undefined) {
         clearInterval(timer);
@@ -341,5 +360,6 @@ export const reapIdleRooms = (
     registry.onRoomReaped?.(room, registry.rooms.size);
     reaped += 1;
   }
+  registry.flush();
   return reaped;
 };
