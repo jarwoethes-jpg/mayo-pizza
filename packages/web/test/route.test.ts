@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { classifySelectedRoute } from "../src/net/route";
+import {
+  classifySelectedRoute,
+  readSelectedRouteStats,
+} from "../src/net/route";
 
 describe("selected WebRTC route", () => {
   it.each([
@@ -33,6 +36,65 @@ describe("selected WebRTC route", () => {
     ]);
 
     expect(classifySelectedRoute(stats)).toBe(expected);
+  });
+
+  it("reads the nominated relay pair and transport stats", () => {
+    const stats = new Map([
+      [
+        "pair",
+        {
+          type: "candidate-pair",
+          state: "succeeded",
+          nominated: true,
+          localCandidateId: "local",
+          remoteCandidateId: "remote",
+          currentRoundTripTime: 0.025,
+          availableOutgoingBitrate: 1_250_000,
+          bytesSent: 100,
+          bytesReceived: 200,
+        },
+      ],
+      [
+        "local",
+        {
+          id: "local",
+          type: "local-candidate",
+          candidateType: "relay",
+          protocol: "udp",
+          relayProtocol: "tcp",
+        },
+      ],
+      [
+        "remote",
+        {
+          id: "remote",
+          type: "remote-candidate",
+          candidateType: "host",
+        },
+      ],
+    ]);
+
+    expect(readSelectedRouteStats(stats)).toEqual({
+      route: "relay",
+      protocol: "udp",
+      relayProtocol: "tcp",
+      currentRoundTripTime: 0.025,
+      availableOutgoingBitrate: 1_250_000,
+      bytesSent: 100,
+      bytesReceived: 200,
+    });
+  });
+
+  it("keeps unavailable pair details undefined", () => {
+    expect(readSelectedRouteStats(undefined)).toEqual({
+      route: undefined,
+      protocol: undefined,
+      relayProtocol: undefined,
+      currentRoundTripTime: undefined,
+      availableOutgoingBitrate: undefined,
+      bytesSent: undefined,
+      bytesReceived: undefined,
+    });
   });
 
   it.each([

@@ -14,7 +14,12 @@ import {
   mapInputFiles,
 } from "./folder/entries";
 import { createPeer, type PeerConnection, type PeerRole } from "./net/peer";
-import { classifySelectedRoute, type SelectedRoute } from "./net/route";
+import {
+  classifySelectedRoute,
+  readSelectedRouteStats,
+  type SelectedRoute,
+  type SelectedRouteStats,
+} from "./net/route";
 import { createSignalingClient, type SignalingError } from "./net/signaling";
 import {
   createTransferController,
@@ -87,6 +92,21 @@ const getSessionCopy = (
 const getTechnicalShareUrl = (slug: string): string =>
   makeRoomShareUrl(window.location.origin, slug);
 
+const formatSelectedRoute = (
+  route: SelectedRoute | undefined,
+  relayProtocol: "udp" | "tcp" | undefined,
+): string => {
+  if (route === undefined) {
+    return "—";
+  }
+  return route === "relay" && relayProtocol !== undefined
+    ? `${route} (${relayProtocol})`
+    : route;
+};
+
+const formatRoundTripTime = (seconds: number | undefined): string =>
+  seconds === undefined ? "—" : `${Math.round(seconds * 1000)} ms`;
+
 const escapeAttribute = (value: string): string =>
   value
     .replaceAll("&", "&amp;")
@@ -113,6 +133,12 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     PasswordPromptState | undefined
   >(undefined);
   const [selectedRoute, setSelectedRoute] = useState<SelectedRoute | undefined>(
+    undefined,
+  );
+  const [selectedRouteStats, setSelectedRouteStats] = useState<
+    SelectedRouteStats | undefined
+  >(undefined);
+  const [observedRate, setObservedRate] = useState<number | undefined>(
     undefined,
   );
   const [connectionState, setConnectionState] =
@@ -187,8 +213,12 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     connectionStateRef.current = "new";
     peerAttachedRef.current = false;
     silentRoomRemintPendingRef.current = false;
+    setSelectedRoute(undefined);
+    setSelectedRouteStats(undefined);
+    setObservedRate(undefined);
     let active = true;
     let stopRoomHeartbeat = (): void => {};
+    let stopStatsSampling = (): void => {};
     const signaling = createSignalingClient();
     const peer = createPeer(role, signaling);
     const transfer = createTransferController(role, peer, {
@@ -267,6 +297,70 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     });
     peerRef.current = peer;
     transferRef.current = transfer;
+    const startStatsSampling = (): void => {
+      stopStatsSampling();
+      let sampling = true;
+      let previousSample:
+        | {
+            sampledAt: number;
+            bytesSent: number | undefined;
+            bytesReceived: number | undefined;
+          }
+        | undefined;
+
+      const sample = async (): Promise<void> => {
+        try {
+          const stats = await peer.getStats();
+          if (!active || !sampling) {
+            return;
+          }
+          const routeStats = readSelectedRouteStats(stats);
+          const sampledAt = Date.now();
+          setSelectedRouteStats(routeStats);
+          if (routeStats.route !== undefined) {
+            setSelectedRoute(routeStats.route);
+          }
+          if (previousSample !== undefined) {
+            const elapsedSeconds =
+              (sampledAt - previousSample.sampledAt) / 1000;
+            const deltas = [
+              routeStats.bytesSent !== undefined &&
+              previousSample.bytesSent !== undefined &&
+              routeStats.bytesSent >= previousSample.bytesSent
+                ? routeStats.bytesSent - previousSample.bytesSent
+                : undefined,
+              routeStats.bytesReceived !== undefined &&
+              previousSample.bytesReceived !== undefined &&
+              routeStats.bytesReceived >= previousSample.bytesReceived
+                ? routeStats.bytesReceived - previousSample.bytesReceived
+                : undefined,
+            ].filter((delta): delta is number => delta !== undefined);
+            if (elapsedSeconds > 0 && deltas.length > 0) {
+              setObservedRate(
+                deltas.reduce((total, delta) => total + delta, 0) /
+                  elapsedSeconds,
+              );
+            }
+          }
+          previousSample = {
+            sampledAt,
+            bytesSent: routeStats.bytesSent,
+            bytesReceived: routeStats.bytesReceived,
+          };
+        } catch {
+          // Stats sampling is deliberately best-effort and never gates a transfer.
+        }
+      };
+
+      void sample();
+      const timer = window.setInterval(() => {
+        void sample();
+      }, 1000);
+      stopStatsSampling = () => {
+        sampling = false;
+        window.clearInterval(timer);
+      };
+    };
     const unsubscribePeerJoined = signaling.on("peer-joined", () => {
       peerAttachedRef.current = true;
     });
@@ -302,6 +396,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       } else if (state === "new" || state === "connecting") {
         setSessionStatus("connecting");
       } else if (state === "disconnected" || state === "failed") {
+        stopStatsSampling();
         setSessionStatus("reconnecting");
         setAnnouncement(
           "Slice dropped! Our connection got a little messy. We’re getting a fresh one ready, but in the meantime, check your Wi-Fi!",
@@ -316,6 +411,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       sendAutoPing();
     });
     const unsubscribeData = peer.on("data-open", () => {
+      startStatsSampling();
       if (role !== "downloader" || routeStatSentRef.current) {
         return;
       }
@@ -500,6 +596,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     return () => {
       active = false;
       stopRoomHeartbeat();
+      stopStatsSampling();
       unsubscribeConnection();
       unsubscribeIce();
       unsubscribeCtrl();
@@ -1309,6 +1406,37 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
                 <dl className="technical-grid__row">
                   <dt>ICE</dt>
                   <dd>{iceConnectionState}</dd>
+                </dl>
+                <dl className="technical-grid__row">
+                  <dt>Route</dt>
+                  <dd data-testid="selected-route">
+                    {formatSelectedRoute(
+                      selectedRouteStats?.route ?? selectedRoute,
+                      selectedRouteStats?.relayProtocol,
+                    )}
+                  </dd>
+                </dl>
+                <dl className="technical-grid__row">
+                  <dt>Transport protocol</dt>
+                  <dd data-testid="transport-protocol">
+                    {selectedRouteStats?.protocol ?? "—"}
+                  </dd>
+                </dl>
+                <dl className="technical-grid__row">
+                  <dt>Observed rate</dt>
+                  <dd data-testid="observed-rate">
+                    {observedRate === undefined
+                      ? "—"
+                      : formatTransferRate(observedRate)}
+                  </dd>
+                </dl>
+                <dl className="technical-grid__row">
+                  <dt>RTT</dt>
+                  <dd data-testid="rtt">
+                    {formatRoundTripTime(
+                      selectedRouteStats?.currentRoundTripTime,
+                    )}
+                  </dd>
                 </dl>
                 <dl className="technical-grid__row">
                   <dt>Last pong</dt>
