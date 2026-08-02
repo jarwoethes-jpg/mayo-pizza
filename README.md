@@ -102,7 +102,7 @@ The defaults below are the effective compose defaults unless marked as a standal
 | `RATE_LIMIT_CREATE` | `10` per hour/IP | No | Invalid values fall back to 10; a valid value that is too low throttles room creation, while a high value weakens abuse protection. |
 | `RATE_LIMIT_JOIN` | `60` per hour/IP | No | Invalid values fall back to 60; a valid value that is too low throttles joins. |
 | `RATE_LIMIT_MESSAGE` | `100` per minute/IP | No | Invalid values fall back to 100; a valid value that is too low throttles signaling. |
-| `ROOM_TTL_MS` | `1800000` (30 minutes) | No | Invalid values fall back to 30 minutes; a value that is too short reaps idle rooms sooner, while a long value retains more in-memory state. |
+| `ROOM_TTL_MS` | `1800000` (30 minutes); **production sets `86400000` (24 hours)** | No | Invalid values fall back to 30 minutes; a value that is too short reaps idle rooms sooner, while a long value retains more in-memory state. The privacy page states 24 idle hours, which matches production, not this default. |
 | `LOG_LEVEL` | `info` in compose; `silent` under tests and `info` otherwise | No | Logs become too noisy or too quiet; use a Fastify-supported level. |
 | `METRICS_TOKEN` | None | Yes in compose | Compose refuses to start without it; a wrong bearer token receives 404 from `/metrics`. |
 | `VITEST` | unset | Test-only | Setting `VITEST=true` makes the server use its silent test logging default. |

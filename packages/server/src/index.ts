@@ -32,10 +32,14 @@ const MAX_ROOM_PEERS = 2;
 /**
  * Explicit Argon2id settings at the OWASP-recommended argon2id minimum.
  *
- * WHY: the room password is on a capability URL that expires after 30 idle
- * minutes, behind a five-attempt sticky room lockout and 60 joins/hour/IP
- * limit, so online guessing is the threat model. Cheap verification is also
- * hardening because Argon2 shares libuv's threadpool with static file serving.
+ * WHY: the room password is on a capability URL that lives as long as the room
+ * — ROOM_TTL_MS, 30 idle minutes by default but 24 idle hours in production —
+ * so the TTL does not meaningfully bound guessing. The real bounds are the
+ * five-attempt sticky room lockout and the 60 joins/hour/IP limit, which cap
+ * online attempts regardless of how long the URL stays valid; online guessing
+ * is the threat model, not offline cracking of a stolen hash. Cheap
+ * verification is also hardening because Argon2 shares libuv's threadpool with
+ * static file serving.
  */
 export const ARGON2_OPTIONS = Object.freeze({
   type: argon2.argon2id,
