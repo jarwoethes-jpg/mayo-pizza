@@ -41,6 +41,82 @@ describe("sink strategy detection", () => {
     expect(detectSinkStrategy({})).toBe("blob");
   });
 
+  it("routes Safari macOS to the blob sink", () => {
+    expect(
+      detectSinkStrategy({
+        serviceWorker: {},
+        userAgent:
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+      }),
+    ).toBe("blob");
+  });
+
+  it("routes Safari iOS to the blob sink", () => {
+    expect(
+      detectSinkStrategy({
+        serviceWorker: {},
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+      }),
+    ).toBe("blob");
+  });
+
+  it("routes a GestureEvent browser to the blob sink", () => {
+    expect(
+      detectSinkStrategy({ serviceWorker: {}, hasGestureEvent: true }),
+    ).toBe("blob");
+  });
+
+  it("keeps Chrome desktop on the service-worker sink", () => {
+    expect(
+      detectSinkStrategy({
+        serviceWorker: {},
+        userAgent:
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+      }),
+    ).toBe("sw");
+  });
+
+  it("keeps Edge desktop on the service-worker sink", () => {
+    expect(
+      detectSinkStrategy({
+        serviceWorker: {},
+        userAgent:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
+      }),
+    ).toBe("sw");
+  });
+
+  it("keeps Firefox on the service-worker sink", () => {
+    expect(
+      detectSinkStrategy({
+        serviceWorker: {},
+        userAgent:
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
+      }),
+    ).toBe("sw");
+  });
+
+  it("keeps FSA first for Safari", () => {
+    expect(
+      detectSinkStrategy({
+        showSaveFilePicker: () => undefined,
+        serviceWorker: {},
+        userAgent:
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+      }),
+    ).toBe("fsa");
+  });
+
+  it("uses the blob sink for Safari without a service worker", () => {
+    expect(
+      detectSinkStrategy({
+        userAgent:
+          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+      }),
+    ).toBe("blob");
+  });
+
   it("allows exactly 500 MiB and refuses larger blob downloads", () => {
     expect(() => createBlobSink("allowed.bin", BLOB_MAX_BYTES)).not.toThrow();
     expect(() => createBlobSink("too-large.bin", BLOB_MAX_BYTES + 1)).toThrow(
@@ -86,6 +162,24 @@ describe("blob sink limits", () => {
     expect(() =>
       createBlobSink("desktop-ok.bin", BLOB_MAX_BYTES_IOS + 1),
     ).not.toThrow();
+  });
+
+  it("includes the platform cap and desktop remedy in oversized errors", () => {
+    const iphoneUserAgent =
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
+    vi.stubGlobal("navigator", {
+      userAgent: iphoneUserAgent,
+      platform: "iPhone",
+    });
+
+    const createTooLargeSink = () =>
+      createBlobSink("too-large.bin", BLOB_MAX_BYTES_IOS + 1);
+
+    expect(createTooLargeSink).toThrow(/too large/i);
+    expect(createTooLargeSink).toThrow(
+      new RegExp(`${BLOB_MAX_BYTES_IOS / (1024 * 1024)} MB`),
+    );
+    expect(createTooLargeSink).toThrow(/Chrome or Firefox on a desktop/i);
   });
 
   it("releases the blob parts after close", () => {

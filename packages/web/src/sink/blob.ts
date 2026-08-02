@@ -42,9 +42,11 @@ export const blobMaxBytes = (
 };
 
 export const createBlobSink = (name: string, totalBytes: number): Sink => {
-  if (totalBytes > blobMaxBytes()) {
+  const maxBytes = blobMaxBytes();
+  if (totalBytes > maxBytes) {
+    const maxMegabytes = maxBytes / (1024 * 1024);
     throw new Error(
-      "This file is too large for the in-memory download fallback. Enable File System Access or service-worker downloads.",
+      `This file is too large for this browser's in-memory download limit of ${maxMegabytes} MB. Open this link in Chrome or Firefox on a desktop to receive it.`,
     );
   }
 

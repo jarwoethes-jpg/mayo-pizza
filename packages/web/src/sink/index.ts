@@ -73,6 +73,8 @@ const normalizeOverride = (value: unknown): SinkOverride | undefined => {
 interface SinkFeatureEnvironment {
   showSaveFilePicker?: unknown;
   serviceWorker?: unknown;
+  userAgent?: string | undefined;
+  hasGestureEvent?: boolean | undefined;
 }
 
 const browserSinkFeatures = (): SinkFeatureEnvironment => ({
@@ -83,7 +85,31 @@ const browserSinkFeatures = (): SinkFeatureEnvironment => ({
           .showSaveFilePicker,
   serviceWorker:
     typeof navigator === "undefined" ? undefined : navigator.serviceWorker,
+  userAgent: typeof navigator === "undefined" ? undefined : navigator.userAgent,
+  hasGestureEvent:
+    typeof window === "undefined"
+      ? undefined
+      : (window as Window & { GestureEvent?: unknown }).GestureEvent !==
+        undefined,
 });
+
+/**
+ * Detects WebKit using deliberately loose signals.
+ *
+ * This biases toward over-detection: a false negative leaves Safari on the
+ * broken service-worker sink, while a false positive only selects the
+ * memory-capped blob sink for a browser that could stream.
+ */
+export const isWebKit = (environment: SinkFeatureEnvironment): boolean => {
+  if (environment.hasGestureEvent === true) {
+    return true;
+  }
+  const userAgent = environment.userAgent ?? "";
+  return (
+    /safari/i.test(userAgent) &&
+    !/chrome|chromium|crios|edg|edgios|opr|fxios|android/i.test(userAgent)
+  );
+};
 
 /** Detects the best native sink without invoking a permission prompt. */
 export const detectSinkStrategy = (
@@ -94,7 +120,8 @@ export const detectSinkStrategy = (
   }
   if (
     environment.serviceWorker !== undefined &&
-    typeof ReadableStream === "function"
+    typeof ReadableStream === "function" &&
+    !isWebKit(environment)
   ) {
     return "sw";
   }
