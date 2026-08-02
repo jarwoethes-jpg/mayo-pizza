@@ -3,6 +3,7 @@ import type { Sink } from "./index";
 export const SINK_QUEUE_HIGH_WATERMARK = 8 * 1024 * 1024;
 export const SINK_STALL_NOTICE_MS = 30_000;
 export const SINK_STALL_ABORT_MS = 600_000;
+export const SINK_START_TIMEOUT_MS = 60_000;
 
 export interface SinkStall {
   stalled: boolean;
@@ -52,6 +53,7 @@ export class SinkManager {
     | undefined;
   private queuedBytes = 0;
   private active: PendingWrite | undefined;
+  private hasCompletedWrite = false;
   private processing = false;
   private closeRequested = false;
   private closePromise: Promise<void> | undefined;
@@ -160,6 +162,7 @@ export class SinkManager {
     try {
       await Promise.resolve(this.sink.write(next.bytes));
       if (!this.cancelled && this.failure === undefined) {
+        this.hasCompletedWrite = true;
         next.resolve();
       }
     } catch (error) {
@@ -227,22 +230,26 @@ export class SinkManager {
       this.stalledSinceMs = sinceMs;
       this.onStallChange?.({ stalled: true, sinceMs });
     }, SINK_STALL_NOTICE_MS);
-    this.stallAbortTimer = globalThis.setTimeout(() => {
-      if (
-        this.active !== pending ||
-        this.cancelled ||
-        this.failure !== undefined
-      ) {
-        return;
-      }
-      const message =
-        this.sink.isResponsive?.() === false
-          ? "The download service worker stopped responding."
-          : "The download has been paused for too long. Your browser stopped accepting data.";
-      const error = new Error(message);
-      pending.reject(error);
-      this.fail(error);
-    }, SINK_STALL_ABORT_MS);
+    this.stallAbortTimer = globalThis.setTimeout(
+      () => {
+        if (
+          this.active !== pending ||
+          this.cancelled ||
+          this.failure !== undefined
+        ) {
+          return;
+        }
+        const message = this.hasCompletedWrite
+          ? this.sink.isResponsive?.() === false
+            ? "The download service worker stopped responding."
+            : "The download has been paused for too long. Your browser stopped accepting data."
+          : "The download never started — your browser did not begin saving the file. Check for a blocked or dismissed download prompt, then try again.";
+        const error = new Error(message);
+        pending.reject(error);
+        this.fail(error);
+      },
+      this.hasCompletedWrite ? SINK_STALL_ABORT_MS : SINK_START_TIMEOUT_MS,
+    );
   }
 
   private clearWriteTimers(reportRecovery = false): void {

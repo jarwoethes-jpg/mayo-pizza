@@ -13,6 +13,7 @@ import {
   SINK_PROGRESS_WATCHDOG_MS,
   SINK_STALL_ABORT_MS,
   SINK_STALL_NOTICE_MS,
+  SINK_START_TIMEOUT_MS,
   SinkManager,
   SwStreamSink,
 } from "../src/sink";
@@ -85,6 +86,74 @@ describe("receiver sink commit protocol", () => {
 });
 
 describe("bounded sink manager", () => {
+  it("fails a write that never starts after the start timeout", async () => {
+    vi.useFakeTimers();
+    const sink = {
+      strategy: "null" as const,
+      write: () => new Promise<void>(() => {}),
+      close: vi.fn(),
+      cancel: vi.fn(),
+    };
+    const stalls: Array<{ stalled: boolean; sinceMs: number } | undefined> = [];
+    const manager = new SinkManager(sink, {
+      onStallChange: (stall) => stalls.push(stall),
+    });
+    const write = manager.write(new Uint8Array([1]));
+
+    await vi.advanceTimersByTimeAsync(SINK_STALL_NOTICE_MS);
+    expect(stalls[0]?.stalled).toBe(true);
+
+    const rejection = expect(write).rejects.toThrow(
+      "The download never started — your browser did not begin saving the file. Check for a blocked or dismissed download prompt, then try again.",
+    );
+    await vi.advanceTimersByTimeAsync(
+      SINK_START_TIMEOUT_MS - SINK_STALL_NOTICE_MS,
+    );
+    await rejection;
+  });
+
+  it("uses the long stall timeout after a write completes", async () => {
+    vi.useFakeTimers();
+    let writeCount = 0;
+    const sink = {
+      strategy: "null" as const,
+      write: () => {
+        writeCount += 1;
+        return writeCount === 1
+          ? Promise.resolve()
+          : new Promise<void>(() => {});
+      },
+      close: vi.fn(),
+      cancel: vi.fn(),
+      isResponsive: () => true,
+    };
+    const manager = new SinkManager(sink);
+
+    await expect(manager.write(new Uint8Array([1]))).resolves.toBeUndefined();
+    const write = manager.write(new Uint8Array([2]));
+    let settled = false;
+    void write.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(SINK_START_TIMEOUT_MS);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    const rejection = expect(write).rejects.toThrow(
+      "The download has been paused for too long. Your browser stopped accepting data.",
+    );
+    await vi.advanceTimersByTimeAsync(
+      SINK_STALL_ABORT_MS - SINK_START_TIMEOUT_MS,
+    );
+    await rejection;
+  });
+
   it("calls cancel while a write is still pending", async () => {
     let resolveWrite: (() => void) | undefined;
     const cancel = vi.fn();
@@ -152,15 +221,22 @@ describe("bounded sink manager", () => {
 
   it("fails a stalled write at the ceiling with the responsive message", async () => {
     vi.useFakeTimers();
+    let writeCount = 0;
     const sink = {
       strategy: "null" as const,
-      write: () => new Promise<void>(() => {}),
+      write: () => {
+        writeCount += 1;
+        return writeCount === 1
+          ? Promise.resolve()
+          : new Promise<void>(() => {});
+      },
       close: vi.fn(),
       cancel: vi.fn(),
       isResponsive: () => true,
     };
     const manager = new SinkManager(sink);
-    const write = manager.write(new Uint8Array([1]));
+    await expect(manager.write(new Uint8Array([1]))).resolves.toBeUndefined();
+    const write = manager.write(new Uint8Array([2]));
 
     await vi.advanceTimersByTimeAsync(SINK_STALL_NOTICE_MS);
     const rejection = expect(write).rejects.toThrow(
@@ -174,15 +250,22 @@ describe("bounded sink manager", () => {
 
   it("fails a stalled write at the ceiling with the unresponsive message", async () => {
     vi.useFakeTimers();
+    let writeCount = 0;
     const sink = {
       strategy: "null" as const,
-      write: () => new Promise<void>(() => {}),
+      write: () => {
+        writeCount += 1;
+        return writeCount === 1
+          ? Promise.resolve()
+          : new Promise<void>(() => {});
+      },
       close: vi.fn(),
       cancel: vi.fn(),
       isResponsive: () => false,
     };
     const manager = new SinkManager(sink);
-    const write = manager.write(new Uint8Array([1]));
+    await expect(manager.write(new Uint8Array([1]))).resolves.toBeUndefined();
+    const write = manager.write(new Uint8Array([2]));
 
     await vi.advanceTimersByTimeAsync(SINK_STALL_NOTICE_MS);
     const rejection = expect(write).rejects.toThrow(
@@ -196,14 +279,21 @@ describe("bounded sink manager", () => {
 
   it("treats a sink without liveness as unknown at the ceiling", async () => {
     vi.useFakeTimers();
+    let writeCount = 0;
     const sink = {
       strategy: "null" as const,
-      write: () => new Promise<void>(() => {}),
+      write: () => {
+        writeCount += 1;
+        return writeCount === 1
+          ? Promise.resolve()
+          : new Promise<void>(() => {});
+      },
       close: vi.fn(),
       cancel: vi.fn(),
     };
     const manager = new SinkManager(sink);
-    const write = manager.write(new Uint8Array([1]));
+    await expect(manager.write(new Uint8Array([1]))).resolves.toBeUndefined();
+    const write = manager.write(new Uint8Array([2]));
 
     await vi.advanceTimersByTimeAsync(SINK_STALL_NOTICE_MS);
     const rejection = expect(write).rejects.toThrow(

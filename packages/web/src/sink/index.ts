@@ -150,6 +150,7 @@ export {
   SINK_QUEUE_HIGH_WATERMARK,
   SINK_STALL_ABORT_MS,
   SINK_STALL_NOTICE_MS,
+  SINK_START_TIMEOUT_MS,
   SinkManager,
   type SinkManagerOptions,
   type SinkStall,

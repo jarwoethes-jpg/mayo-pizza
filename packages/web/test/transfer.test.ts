@@ -184,12 +184,13 @@ interface ReceiverStallHarness {
   emitWorkerDone: () => void;
   onError: ReturnType<typeof vi.fn>;
   onSinkStall: ReturnType<typeof vi.fn>;
-  resolveWrite: (() => void) | undefined;
+  resolveWrite: () => void;
 }
 
 const createReceiverStallHarness = async (): Promise<ReceiverStallHarness> => {
   const ctrlHandlers = new Map<string, (message: unknown) => void>();
   let dataMessage: ((event: MessageEvent<unknown>) => void) | undefined;
+  let writeCount = 0;
   let resolveWrite: (() => void) | undefined;
   const onError = vi.fn();
   const onSinkStall = vi.fn();
@@ -224,8 +225,8 @@ const createReceiverStallHarness = async (): Promise<ReceiverStallHarness> => {
     t: "manifest" as const,
     transferId: "transfer-stall-watchdog",
     mode: "single" as const,
-    items: [{ path: "file.bin", size: 4, lastModified: 0 }],
-    totalBytes: 4,
+    items: [{ path: "file.bin", size: 8, lastModified: 0 }],
+    totalBytes: 8,
     suggestedName: "file.bin",
   };
   const controller = createTransferController("downloader", peer as never, {
@@ -234,10 +235,14 @@ const createReceiverStallHarness = async (): Promise<ReceiverStallHarness> => {
     receiverWorkerFactory: () => worker,
     sinkFactory: () => ({
       strategy: "null" as const,
-      write: () =>
-        new Promise<void>((resolve) => {
-          resolveWrite = resolve;
-        }),
+      write: () => {
+        writeCount += 1;
+        return writeCount === 1
+          ? Promise.resolve()
+          : new Promise<void>((resolve) => {
+              resolveWrite = resolve;
+            });
+      },
       close: vi.fn(),
       cancel: vi.fn(),
     }),
@@ -263,7 +268,18 @@ const createReceiverStallHarness = async (): Promise<ReceiverStallHarness> => {
       chunkId: "0",
       buffer: new ArrayBuffer(4),
       bytesDone: 4,
-      totalBytes: 4,
+      totalBytes: 8,
+    },
+  } as MessageEvent<unknown>);
+  await Promise.resolve();
+  dataMessage?.({ data: new ArrayBuffer(4) } as MessageEvent<unknown>);
+  worker.onmessage?.({
+    data: {
+      t: "chunk",
+      chunkId: "1",
+      buffer: new ArrayBuffer(4),
+      bytesDone: 8,
+      totalBytes: 8,
     },
   } as MessageEvent<unknown>);
 
@@ -271,12 +287,12 @@ const createReceiverStallHarness = async (): Promise<ReceiverStallHarness> => {
     controller,
     emitWorkerDone: () => {
       worker.onmessage?.({
-        data: { t: "done", bytesDone: 4, sha256: "hash" },
+        data: { t: "done", bytesDone: 8, sha256: "hash" },
       } as MessageEvent<unknown>);
     },
     onError,
     onSinkStall,
-    resolveWrite,
+    resolveWrite: () => resolveWrite?.(),
   };
 };
 
