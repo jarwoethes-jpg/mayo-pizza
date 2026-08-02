@@ -51,7 +51,7 @@ describe("password room UX helpers", () => {
     expect(privacy).toMatch(/peer-to-peer.*never touch/i);
     expect(privacy).toMatch(/coturn/i);
     expect(privacy).toMatch(/7 days/);
-    expect(privacy).toMatch(/30 idle minutes/);
+    expect(privacy).toMatch(/24 idle hours/);
     expect(terms).toMatch(/lawful|illegal/i);
     expect(terms).toMatch(/relay/i);
     expect(terms).toMatch(/as-is/i);

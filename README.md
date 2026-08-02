@@ -1,6 +1,6 @@
 # mayo.pizza
 
-mayo.pizza is a capability-URL transfer tool: the browser creates a short-lived room, peers negotiate through a small Fastify + `ws` signaling service, and the file travels over an encrypted WebRTC data channel. The service keeps room state in memory and does not need Redis; a process restart therefore drops active rooms.
+mayo.pizza is a capability-URL transfer tool: the browser creates a short-lived room, peers negotiate through a small Fastify + `ws` signaling service, and the file travels over an encrypted WebRTC data channel. The service keeps room state in memory and does not need Redis; it snapshots that state to a JSON file on disk, so active rooms survive a process restart.
 
 ## Architecture
 

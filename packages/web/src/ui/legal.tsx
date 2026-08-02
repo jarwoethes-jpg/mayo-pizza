@@ -38,7 +38,7 @@ export const PRIVACY_COPY = [
   "Our signaling server sees room slugs, peer IDs, and IP addresses. It never sees filenames or file contents.",
   "If a connection falls back to TURN, encrypted bytes do transit our coturn server. They are DTLS-encrypted and unreadable to us, but they are traffic through our box, and we say so plainly.",
   "We retain signaling access logs for 7 days. Those logs contain no filenames and no slugs.",
-  "Rooms live in memory and vanish when we restart or after 30 idle minutes.",
+  "Rooms hold only a slug, timestamps, and hashes — never file data. They survive a server restart and expire after 24 idle hours.",
 ] as const;
 
 /** Renders the plain-language privacy stance. */
