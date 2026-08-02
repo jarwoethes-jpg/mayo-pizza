@@ -196,7 +196,7 @@ docker compose -f infra/docker-compose.yml pull app
 docker compose -f infra/docker-compose.yml up -d app
 ```
 
-Rooms are in memory, so any app restart drops all active transfers. That is the deliberate operational tradeoff of running without Redis.
+Rooms themselves survive a restart: room state is an in-memory map snapshotted to disk, and rooms expire after 24 idle hours. Any transfer that is in flight at the moment of the restart is still dropped, because both peers lose their live connection. That is the deliberate operational tradeoff of running without Redis.
 
 ## Load test
 

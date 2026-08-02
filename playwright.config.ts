@@ -32,6 +32,10 @@ export default defineConfig({
               // locally with the same static secret (see e2e README/CI setup).
               STUN_HOST: "127.0.0.1",
               TURN_HOST: "127.0.0.1",
+              // Keep the local suite from exhausting its per-IP rate limits.
+              RATE_LIMIT_CREATE: "1000",
+              RATE_LIMIT_JOIN: "1000",
+              RATE_LIMIT_MESSAGE: "10000",
             },
           },
           {
