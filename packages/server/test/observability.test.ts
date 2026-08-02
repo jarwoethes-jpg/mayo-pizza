@@ -327,3 +327,90 @@ describe("observability endpoints", () => {
     }
   });
 });
+
+describe("structured log privacy", () => {
+  // WHY: this pins the public privacy promise made on the site and in launch copy so it cannot silently become false.
+  it("never logs room capabilities or passwords", async () => {
+    vi.stubEnv("LOG_LEVEL", "info");
+    const logs: string[] = [];
+    const logStream = new Writable({
+      write(chunk, _encoding, callback) {
+        logs.push(chunk.toString());
+        callback();
+      },
+    });
+    const server = createServer({ logStream });
+    const correctPassword = "correct-horse-battery-staple";
+    const wrongPassword = "wrong-password-guess";
+    const uploader = createFakeSocket();
+    const joiner = createFakeSocket();
+    const malformed = createFakeSocket();
+    let slug = "";
+    let uploaderToken = "";
+
+    try {
+      connectFakeSocket(server, uploader);
+      connectFakeSocket(server, joiner);
+      connectFakeSocket(server, malformed);
+
+      uploader.emitMessage({ t: "create", password: correctPassword });
+      const created = await waitForFrame(
+        uploader,
+        (frame) => frame.t === "created",
+      );
+      if (
+        typeof created.slug !== "string" ||
+        typeof created.uploaderToken !== "string"
+      ) {
+        throw new Error(
+          "The fake create flow did not return room capabilities.",
+        );
+      }
+      slug = created.slug;
+      uploaderToken = created.uploaderToken;
+
+      joiner.emitMessage({ t: "join", slug, password: wrongPassword });
+      await waitForFrame(
+        joiner,
+        (frame) => frame.t === "error" && frame.code === "BAD_PASSWORD",
+      );
+      joiner.emitMessage({ t: "join", slug, password: correctPassword });
+      await waitForFrame(
+        joiner,
+        (frame) => frame.t === "joined" && frame.role === "downloader",
+      );
+
+      malformed.emitMessage({ t: "not-a-real-message" });
+      await waitForFrame(
+        malformed,
+        (frame) => frame.t === "error" && frame.code === "MALFORMED",
+      );
+      uploader.close();
+    } finally {
+      await server.close();
+    }
+
+    const logText = logs.join("");
+    expect(logText.trim()).not.toBe("");
+    const events = logText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .map((line) => line.event);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        "room_created",
+        "password_failed",
+        "room_joined",
+        "malformed",
+        "room_left",
+        "ws_close",
+      ]),
+    );
+    expect(logText).not.toContain(slug);
+    expect(logText).not.toContain(uploaderToken);
+    expect(logText).not.toContain(correctPassword);
+    expect(logText).not.toContain(wrongPassword);
+  });
+});
