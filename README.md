@@ -159,7 +159,7 @@ Rotation invalidates the old shared secret. In-flight relayed sessions break and
 
 ## Logs, retention, and privacy
 
-The app writes structured JSON logs to stdout. Docker's `json-file` driver keeps seven 10 MiB files for the app container, a size-based cap of about 70 MiB rather than a guaranteed seven calendar days. Tune the size/file count after observing the host's log rate if a seven-day policy is mandatory. Caddy and coturn logs are available through `docker compose logs caddy` and `docker compose logs coturn`; their host-side retention is not configured by this stack.
+The app writes structured JSON logs to stdout through Docker's `journald` driver, so the host journal keeps them across app container recreation and host reboot. Operator note: the orchestrator must set `RateLimitIntervalSec=0` (or a high `RateLimitBurst`) so room events are never dropped, and `MaxRetentionSec=7d` so retention matches the privacy-page claim. These are host settings; do not apply them from this repo. Caddy and coturn logs are available through `docker compose logs caddy` and `docker compose logs coturn`; their host-side retention is not configured by this stack.
 
 The privacy guarantee is that app logs do not contain room slugs, uploader tokens, or filenames. Phase 8a enforces the slug/filename rule with a test. Rooms and transfer state remain in memory only.
 

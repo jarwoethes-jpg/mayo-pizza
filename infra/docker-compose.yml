@@ -34,10 +34,9 @@ services:
       start_period: 10s
       retries: 3
     logging:
-      driver: json-file
+      driver: journald
       options:
-        max-size: "10m"
-        max-file: "7"
+        tag: "mayo-app"
     restart: unless-stopped
     volumes:
       - room_state:/app/state
