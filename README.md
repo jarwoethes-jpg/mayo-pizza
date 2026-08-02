@@ -207,3 +207,11 @@ env URL=ws://127.0.0.1:3100/ws SERVER_PID=<server-pid> METRICS_TOKEN=<matching-t
 ```
 
 For the room-reaper gate, also set a short positive `ROOM_TTL_MS` in the server and harness environment. The harness passes when it reports no fatal/error condition, all rooms are reaped when the reaper check is enabled, and final RSS is no more than 1.5 times the warm-up RSS. Review the JSON summary and `/tmp/mayo-loadtest.jsonl`; do not treat a run with a metrics error as a pass.
+
+## License
+
+Copyright (C) 2026 mayo.pizza contributors
+
+Licensed under the GNU Affero General Public License v3.0 only (`AGPL-3.0-only`). The full text is in [LICENSE](LICENSE).
+
+The AGPL was chosen deliberately: mayo.pizza's pitch is that its privacy properties are auditable. Section 13 extends that downstream — if you modify this code and run it as a network service, the people using your instance are entitled to your modified source. Self-hosting, studying, and modifying it for private use carry no such obligation.

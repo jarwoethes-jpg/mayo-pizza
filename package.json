@@ -1,6 +1,7 @@
 {
   "name": "mayo.pizza",
   "private": true,
+  "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
     "check": "pnpm --filter shared build && biome check . && pnpm --filter shared exec tsc --noEmit && pnpm --filter server exec tsc --noEmit && pnpm --filter web exec tsc --noEmit",
