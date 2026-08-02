@@ -669,6 +669,7 @@ describe("localhost signaling server", () => {
       "event",
       "peerId",
       "ip",
+      "role",
       "roomCount",
       "code",
     ]);

@@ -96,6 +96,7 @@ const sendError = (
 type LogFields = {
   peerId?: string;
   ip?: string;
+  role?: "uploader" | "downloader";
   roomCount?: number;
   code?: string;
 };
@@ -335,6 +336,7 @@ const handleMessage = async (
     }
     const suppliedToken = message.uploaderToken;
     const isUploaderRejoin = suppliedToken !== undefined;
+    const role = isUploaderRejoin ? "uploader" : "downloader";
     if (isUploaderRejoin) {
       const expected = room.uploaderTokenHash;
       const supplied = Buffer.from(hashUploaderToken(suppliedToken));
@@ -433,11 +435,12 @@ const handleMessage = async (
     sendMessage(session.socket, {
       t: "joined",
       peerId: session.id,
-      role: isUploaderRejoin ? "uploader" : "downloader",
+      role,
     });
     emitLog("room_joined", {
       peerId: session.id,
       ip: session.ip,
+      role,
       roomCount: rooms.rooms.size,
     });
     if (isUploaderRejoin) {

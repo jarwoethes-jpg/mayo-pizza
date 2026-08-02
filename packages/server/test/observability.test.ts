@@ -175,6 +175,79 @@ describe("observability endpoints", () => {
     }
   });
 
+  it("records the role for each successful room join", async () => {
+    vi.stubEnv("LOG_LEVEL", "info");
+    const logs: string[] = [];
+    const logStream = new Writable({
+      write(chunk, _encoding, callback) {
+        logs.push(chunk.toString());
+        callback();
+      },
+    });
+    const server = createServer({ logStream });
+
+    try {
+      const uploader = createFakeSocket();
+      const downloader = createFakeSocket();
+      const uploaderRejoin = createFakeSocket();
+      connectFakeSocket(server, uploader);
+      connectFakeSocket(server, downloader);
+      connectFakeSocket(server, uploaderRejoin);
+
+      uploader.emitMessage({ t: "create", password: "secret" });
+      const created = await waitForFrame(
+        uploader,
+        (frame) => frame.t === "created",
+      );
+      if (
+        typeof created.slug !== "string" ||
+        typeof created.uploaderToken !== "string"
+      ) {
+        throw new Error(
+          "The fake create flow did not return room credentials.",
+        );
+      }
+
+      downloader.emitMessage({
+        t: "join",
+        slug: created.slug,
+        password: "secret",
+      });
+      const downloaderJoined = await waitForFrame(
+        downloader,
+        (frame) => frame.t === "joined",
+      );
+      const downloaderLog = logs
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find(
+          (line) =>
+            line.event === "room_joined" &&
+            line.peerId === downloaderJoined.peerId,
+        );
+      expect(downloaderLog?.role).toBe("downloader");
+
+      uploaderRejoin.emitMessage({
+        t: "join",
+        slug: created.slug,
+        uploaderToken: created.uploaderToken,
+      });
+      const uploaderJoined = await waitForFrame(
+        uploaderRejoin,
+        (frame) => frame.t === "joined",
+      );
+      const uploaderLog = logs
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find(
+          (line) =>
+            line.event === "room_joined" &&
+            line.peerId === uploaderJoined.peerId,
+        );
+      expect(uploaderLog?.role).toBe("uploader");
+    } finally {
+      await server.close();
+    }
+  });
+
   it("keeps token and password failure counters and events separate", async () => {
     vi.stubEnv("LOG_LEVEL", "info");
     vi.stubEnv("METRICS_TOKEN", "metrics-secret");
