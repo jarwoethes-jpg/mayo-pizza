@@ -162,6 +162,34 @@ describe("room snapshot store", () => {
     chmodSync(blockedDirectory, 0o700);
   });
 
+  it("routes persistence failures to the injected logger", () => {
+    const log = vi.fn();
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const store = createRoomStore("state/rooms.json", {
+      fileSystem: {
+        readFileSync: () => "",
+        writeFileSync: () => {
+          throw new Error("simulated write failure");
+        },
+        renameSync: () => undefined,
+        unlinkSync: () => undefined,
+      },
+      log,
+    });
+
+    try {
+      expect(() => store.flush([])).not.toThrow();
+      expect(log).toHaveBeenCalledWith(
+        "[room-store] could not save snapshot state/rooms.json: simulated write failure",
+      );
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it("never exposes a partial target when the temporary write fails", () => {
     const directory = makeTempDirectory();
     const statePath = join(directory, "rooms.json");

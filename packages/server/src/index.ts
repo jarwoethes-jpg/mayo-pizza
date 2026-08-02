@@ -16,6 +16,7 @@ import {
   type RateLimitAction,
   type RateLimiter,
 } from "./ratelimit.js";
+import { createRoomStore } from "./roomStore.js";
 import {
   createRoomRegistry,
   hashUploaderToken,
@@ -103,6 +104,7 @@ type LogFields = {
   role?: "uploader" | "downloader";
   roomCount?: number;
   code?: string;
+  message?: string;
 };
 
 type EmitLog = (event: string, fields?: LogFields) => void;
@@ -677,7 +679,13 @@ export const createServer = (options: ServerOptions = {}): ServerHandle => {
       ttlMs: parseRoomTtlEnv(process.env.ROOM_TTL_MS, ROOM_TTL_MS),
       ...(process.env.ROOM_STATE_PATH === undefined
         ? {}
-        : { statePath: process.env.ROOM_STATE_PATH }),
+        : {
+            roomStore: createRoomStore(process.env.ROOM_STATE_PATH, {
+              log: (message) => {
+                emitLog("room_store_error", { message });
+              },
+            }),
+          }),
     });
   const previousReapHandler = rooms.onRoomReaped;
   rooms.onRoomReaped = (room, roomCount) => {

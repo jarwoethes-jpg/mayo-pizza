@@ -154,6 +154,31 @@ describe("observability endpoints", () => {
     }
   });
 
+  it("routes configured room-store failures through the structured logger", async () => {
+    vi.stubEnv("LOG_LEVEL", "info");
+    vi.stubEnv("ROOM_STATE_PATH", "/tmp");
+    const logs: string[] = [];
+    const logStream = new Writable({
+      write(chunk, _encoding, callback) {
+        logs.push(chunk.toString());
+        callback();
+      },
+    });
+    const server = createServer({ logStream });
+
+    try {
+      await server.app.ready();
+      const roomStoreLog = logs
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .find((line) => line.event === "room_store_error");
+      expect(roomStoreLog?.message).toEqual(
+        expect.stringContaining("[room-store] could not load snapshot /tmp:"),
+      );
+    } finally {
+      await server.close();
+    }
+  });
+
   it("reports active rooms and transfers from the registry", async () => {
     vi.stubEnv("METRICS_TOKEN", "metrics-secret");
     const registry = createRoomRegistry({ startReaper: false });
