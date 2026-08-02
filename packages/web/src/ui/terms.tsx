@@ -8,6 +8,7 @@ export const TERMS_COPY = [
   "Please use mayo.pizza for lawful sharing only. Do not send illegal content, malware, or anything that harms other people.",
   "We may withdraw the service or the relay when safety, capacity, or the law requires it.",
   "The service is provided as-is, without a warranty that every transfer, relay, or room will be available or error-free.",
+  "Donations are voluntary, and they do not purchase availability, priority, or any service guarantee.",
 ] as const;
 
 /** Renders the short service terms and abuse-reporting route. */

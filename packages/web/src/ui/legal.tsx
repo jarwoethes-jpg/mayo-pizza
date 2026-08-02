@@ -1,5 +1,8 @@
 import type { ReactNode } from "react";
 
+/** Mayo’s Ko-fi donation page. */
+export const DONATE_URL = "https://ko-fi.com/mayonesss";
+
 interface LegalPageProps {
   title: string;
   children: ReactNode;
@@ -27,6 +30,9 @@ export const LegalPage = ({ title, children }: LegalPageProps) => (
       <footer className="legal-footer">
         <a href="/privacy">Privacy</a>
         <a href="/terms">Terms &amp; abuse</a>
+        <a href={DONATE_URL} target="_blank" rel="noopener noreferrer">
+          Support
+        </a>
       </footer>
     </article>
   </main>

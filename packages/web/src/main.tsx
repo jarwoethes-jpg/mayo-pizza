@@ -35,7 +35,7 @@ import {
 import { getSinkOverride, getSinkStrategy } from "./sink";
 import { getFailureCopy } from "./ui/copy";
 import { formatBytes, formatEta, formatTransferRate } from "./ui/format";
-import { PrivacyPage } from "./ui/legal";
+import { DONATE_URL, PrivacyPage } from "./ui/legal";
 import {
   getPasswordPromptCopy,
   type PasswordPromptState,
@@ -1504,6 +1504,9 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
             <span className="legal-links">
               <a href="/privacy">Privacy</a>
               <a href="/terms">Terms &amp; abuse</a>
+              <a href={DONATE_URL} target="_blank" rel="noopener noreferrer">
+                Support
+              </a>
             </span>
           </footer>
         </div>
@@ -1514,6 +1517,8 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     </main>
   );
 };
+
+export { RoomView };
 
 type AppRoute =
   | ({ kind: "room" } & RoomViewProps)
