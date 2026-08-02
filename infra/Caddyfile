@@ -35,6 +35,27 @@ http://mayo.pizza, http://turn.mayo.pizza {
 
 mayo.pizza {
 	encode zstd gzip
+	log {
+		output file /var/log/caddy/access.log {
+			roll_at 00:00
+			roll_size 100MiB
+			roll_keep 0
+			roll_keep_for 168h
+		}
+		format filter {
+			wrap json
+			fields {
+				# WHY: the room slug IS the URL path, and the privacy page promises logs hold no slugs.
+				request>uri delete
+				request>remote_ip ip_mask 16 32
+				request>client_ip ip_mask 16 32
+				request>headers>X-Forwarded-For ip_mask 16 32
+				# WHY: Referer is kept for inbound attribution, but a room page linking to
+				# /privacy or /terms would otherwise put the slug back in the log same-origin.
+				request>headers>Referer regexp "^(https?://mayo\.pizza)/.+$" "$1/[same-origin]"
+			}
+		}
+	}
 	import security-headers.caddy
 
 	handle /metrics {

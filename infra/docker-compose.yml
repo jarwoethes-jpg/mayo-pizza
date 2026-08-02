@@ -57,6 +57,7 @@ services:
     volumes:
       - caddy_data:/data
       - caddy_config:/config
+      - caddy_logs:/var/log/caddy
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./security-headers.caddy:/etc/caddy/security-headers.caddy:ro
     depends_on:
@@ -95,6 +96,7 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  caddy_logs:
   room_state:
 
 networks:
