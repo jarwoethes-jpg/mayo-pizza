@@ -5,6 +5,7 @@ export const DOWNLOAD_SERVICE_WORKER = "/download.sw.js";
 export const DOWNLOAD_PATH_PREFIX = "/__mayo-dl/";
 export const SW_CREDIT_BYTES = 8 * 1024 * 1024;
 const SW_MESSAGE_TIMEOUT_MS = 30_000;
+const SW_STARTED_TIMEOUT_MS = 10_000;
 const SW_PING_INTERVAL_MS = 20_000;
 const SW_LIVENESS_TIMEOUT_MS = 45_000;
 
@@ -28,6 +29,7 @@ export type SwPageMessage =
 
 export type SwWorkerMessage =
   | { t: "ready"; id: string; creditBytes: number }
+  | { t: "started"; id: string }
   | { t: "credit"; id: string; sequence: number; bytes: number }
   | { t: "closed"; id: string }
   | { t: "error"; id: string; message: string }
@@ -107,6 +109,15 @@ export class SwStreamSink implements Sink {
       this.flush();
       return;
     }
+    if (message.t === "started") {
+      if (this.startedTimer !== undefined) {
+        window.clearTimeout(this.startedTimer);
+        this.startedTimer = undefined;
+      }
+      this.resolveStarted?.();
+      this.resolveStarted = undefined;
+      return;
+    }
     if (message.t === "credit") {
       if (!isNextSwSequence(this.nextCreditSequence, message.sequence)) {
         this.fail(
@@ -159,8 +170,11 @@ export class SwStreamSink implements Sink {
   private lastPingAt: number | undefined;
   private lastPongAt: number | undefined;
   private readyTimer: number | undefined;
+  private startedTimer: number | undefined;
   private resolveReady: (() => void) | undefined;
   private rejectReady: ((reason: unknown) => void) | undefined;
+  private resolveStarted: (() => void) | undefined;
+  private rejectStarted: ((reason: unknown) => void) | undefined;
   private resolveClosed: (() => void) | undefined;
   private rejectClosed: ((reason: unknown) => void) | undefined;
   private closeTimer: number | undefined;
@@ -224,6 +238,19 @@ export class SwStreamSink implements Sink {
     iframe.src = makeDownloadPath(this.id);
     document.body.append(iframe);
     this.iframe = iframe;
+    await new Promise<void>((resolve, reject) => {
+      this.resolveStarted = resolve;
+      this.rejectStarted = reject;
+      this.startedTimer = window.setTimeout(() => {
+        const controller =
+          navigator.serviceWorker.controller === null ? "null" : "active";
+        reject(
+          new Error(
+            `The download service worker never received the download request (controller=${controller}, path=${makeDownloadPath(this.id)}). The hidden download frame was most likely refused by X-Frame-Options: DENY after falling through to the server.`,
+          ),
+        );
+      }, SW_STARTED_TIMEOUT_MS);
+    });
     this.pingTimer = window.setInterval(() => {
       this.lastPingAt = Date.now();
       this.post({ t: "ping", id: this.id });
@@ -403,6 +430,9 @@ export class SwStreamSink implements Sink {
     this.rejectReady?.(error);
     this.resolveReady = undefined;
     this.rejectReady = undefined;
+    this.rejectStarted?.(error);
+    this.resolveStarted = undefined;
+    this.rejectStarted = undefined;
     this.rejectClosed?.(error);
     this.resolveClosed = undefined;
     this.rejectClosed = undefined;
@@ -415,6 +445,10 @@ export class SwStreamSink implements Sink {
     if (this.readyTimer !== undefined) {
       window.clearTimeout(this.readyTimer);
       this.readyTimer = undefined;
+    }
+    if (this.startedTimer !== undefined) {
+      window.clearTimeout(this.startedTimer);
+      this.startedTimer = undefined;
     }
     if (this.pingTimer !== undefined) {
       window.clearInterval(this.pingTimer);

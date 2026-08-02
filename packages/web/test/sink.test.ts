@@ -16,9 +16,11 @@ import {
   SINK_STALL_ABORT_MS,
   SINK_STALL_NOTICE_MS,
   SINK_START_TIMEOUT_MS,
+  type Sink,
   SinkManager,
   SwStreamSink,
 } from "../src/sink";
+import { createSwSink } from "../src/sink/swStream";
 import type { ReceiverWorkerEvent } from "../src/worker/messages";
 import { ReceiverProcessor } from "../src/worker/receiverLogic";
 
@@ -397,6 +399,57 @@ interface SwSinkHarness {
   sendMessage: (message: unknown) => void;
 }
 
+interface PendingSwSinkHarness {
+  active: { postMessage: ReturnType<typeof vi.fn> };
+  append: ReturnType<typeof vi.fn>;
+  sendMessage: (message: unknown) => void;
+  start: Promise<Sink>;
+}
+
+const SW_STARTED_TIMEOUT_MS = 10_000;
+
+const createPendingSwSinkHarness = (
+  controller: object | null,
+): PendingSwSinkHarness => {
+  const listeners = new Map<string, (event: MessageEvent) => void>();
+  const active = { postMessage: vi.fn() };
+  const serviceWorker = {
+    addEventListener: (type: string, listener: (event: MessageEvent) => void) =>
+      listeners.set(type, listener),
+    removeEventListener: (type: string) => listeners.delete(type),
+    register: vi.fn(async () => ({ active })),
+    controller,
+  };
+  const append = vi.fn();
+  vi.stubGlobal("navigator", { serviceWorker });
+  vi.stubGlobal("window", {
+    clearInterval,
+    clearTimeout,
+    setInterval,
+    setTimeout,
+  });
+  vi.stubGlobal("document", {
+    body: { append },
+    createElement: () => ({ remove: vi.fn() }),
+  });
+  const start = createSwSink("file.bin", 2);
+  return {
+    active,
+    append,
+    sendMessage: (message) => {
+      const firstCall = active.postMessage.mock.calls[0];
+      if (firstCall === undefined) {
+        throw new Error("The sink did not send its init message.");
+      }
+      const id = (firstCall[0] as { id: string }).id;
+      listeners.get("message")?.({
+        data: { ...message, id },
+      } as MessageEvent);
+    },
+    start,
+  };
+};
+
 const createSwSinkHarness = async (): Promise<SwSinkHarness> => {
   const listeners = new Map<string, (event: MessageEvent) => void>();
   const active = { postMessage: vi.fn() };
@@ -406,6 +459,7 @@ const createSwSinkHarness = async (): Promise<SwSinkHarness> => {
     removeEventListener: (type: string) => listeners.delete(type),
     register: vi.fn(async () => ({ active })),
   };
+  const append = vi.fn();
   vi.stubGlobal("navigator", { serviceWorker });
   vi.stubGlobal("window", {
     clearInterval,
@@ -414,7 +468,7 @@ const createSwSinkHarness = async (): Promise<SwSinkHarness> => {
     setTimeout,
   });
   vi.stubGlobal("document", {
-    body: { append: vi.fn() },
+    body: { append },
     createElement: () => ({ remove: vi.fn() }),
   });
   const sink = new SwStreamSink("file.bin", 2);
@@ -432,6 +486,10 @@ const createSwSinkHarness = async (): Promise<SwSinkHarness> => {
       creditBytes: 8,
     },
   } as MessageEvent);
+  await vi.waitFor(() => expect(append).toHaveBeenCalledOnce());
+  listeners.get("message")?.({
+    data: { t: "started", id },
+  } as MessageEvent);
   await started;
   return {
     sink,
@@ -439,6 +497,67 @@ const createSwSinkHarness = async (): Promise<SwSinkHarness> => {
       listeners.get("message")?.({ data: { ...message, id } } as MessageEvent),
   };
 };
+
+describe("service-worker started handshake", () => {
+  it("resolves createSwSink after started and installs the ping timer", async () => {
+    vi.useFakeTimers();
+    const serviceWorkerHarness = createSwTestHarness(0);
+    expect(countMessages(serviceWorkerHarness.outbound, "ready")).toBe(1);
+    expect(countMessages(serviceWorkerHarness.outbound, "started")).toBe(1);
+
+    const harness = createPendingSwSinkHarness({});
+    await vi.waitFor(() =>
+      expect(harness.active.postMessage).toHaveBeenCalledOnce(),
+    );
+    harness.sendMessage({ t: "ready", creditBytes: 8 });
+    await vi.waitFor(() => expect(harness.append).toHaveBeenCalledOnce());
+    harness.sendMessage({ t: "started" });
+
+    await expect(harness.start).resolves.toMatchObject({ strategy: "sw" });
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(
+      harness.active.postMessage.mock.calls.some(
+        (call) =>
+          typeof call[0] === "object" &&
+          call[0] !== null &&
+          "t" in call[0] &&
+          call[0].t === "ping",
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects when started never arrives and reports a null controller", async () => {
+    vi.useFakeTimers();
+    const harness = createPendingSwSinkHarness(null);
+    await vi.waitFor(() =>
+      expect(harness.active.postMessage).toHaveBeenCalledOnce(),
+    );
+    harness.sendMessage({ t: "ready", creditBytes: 8 });
+    await vi.waitFor(() => expect(harness.append).toHaveBeenCalledOnce());
+
+    const rejection = expect(harness.start).rejects.toThrow(
+      /The download service worker never received the download request \(controller=null, path=\/__mayo-dl\/[^)]+\)\. The hidden download frame was most likely refused by X-Frame-Options: DENY after falling through to the server\./,
+    );
+    await vi.advanceTimersByTimeAsync(SW_STARTED_TIMEOUT_MS);
+    await rejection;
+  });
+
+  it("reports an active controller when started never arrives", async () => {
+    vi.useFakeTimers();
+    const harness = createPendingSwSinkHarness({});
+    await vi.waitFor(() =>
+      expect(harness.active.postMessage).toHaveBeenCalledOnce(),
+    );
+    harness.sendMessage({ t: "ready", creditBytes: 8 });
+    await vi.waitFor(() => expect(harness.append).toHaveBeenCalledOnce());
+
+    const rejection = expect(harness.start).rejects.toThrow(
+      /The download service worker never received the download request \(controller=active, path=\/__mayo-dl\/[^)]+\)\./,
+    );
+    await vi.advanceTimersByTimeAsync(SW_STARTED_TIMEOUT_MS);
+    await rejection;
+  });
+});
 
 describe("service-worker close watchdog", () => {
   it("allows commits that keep making progress", async () => {

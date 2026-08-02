@@ -175,6 +175,7 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(new Response("Not found", { status: 404 }));
     return;
   }
+  send(transfer, { t: "started", id: transfer.id });
   const stream = new ReadableStream({
     start(controller) {
       transfer.controller = controller;
