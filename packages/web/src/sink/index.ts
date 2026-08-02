@@ -145,7 +145,12 @@ export const createSink = (
   return new NullSink();
 };
 
-export { BLOB_MAX_BYTES, createBlobSink } from "./blob";
+export {
+  BLOB_MAX_BYTES,
+  BLOB_MAX_BYTES_IOS,
+  blobMaxBytes,
+  createBlobSink,
+} from "./blob";
 export {
   SINK_QUEUE_HIGH_WATERMARK,
   SINK_STALL_ABORT_MS,

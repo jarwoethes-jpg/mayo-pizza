@@ -4,6 +4,8 @@ import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BLOB_MAX_BYTES,
+  BLOB_MAX_BYTES_IOS,
+  blobMaxBytes,
   consumeSwCredit,
   createBlobSink,
   createSwCreditState,
@@ -42,6 +44,78 @@ describe("sink strategy detection", () => {
     expect(() => createBlobSink("too-large.bin", BLOB_MAX_BYTES + 1)).toThrow(
       /too large/i,
     );
+  });
+});
+
+describe("blob sink limits", () => {
+  it("selects the platform-specific blob ceiling", () => {
+    const iphoneUserAgent =
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
+
+    expect(blobMaxBytes({ userAgent: iphoneUserAgent })).toBe(
+      BLOB_MAX_BYTES_IOS,
+    );
+    expect(blobMaxBytes({ platform: "MacIntel", maxTouchPoints: 5 })).toBe(
+      BLOB_MAX_BYTES_IOS,
+    );
+    expect(blobMaxBytes({ platform: "MacIntel", maxTouchPoints: 0 })).toBe(
+      BLOB_MAX_BYTES,
+    );
+    expect(blobMaxBytes({})).toBe(BLOB_MAX_BYTES);
+  });
+
+  it("enforces the iOS blob ceiling", () => {
+    const iphoneUserAgent =
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
+    vi.stubGlobal("navigator", {
+      userAgent: iphoneUserAgent,
+      platform: "iPhone",
+    });
+
+    expect(() => createBlobSink("ok.bin", BLOB_MAX_BYTES_IOS)).not.toThrow();
+    expect(() =>
+      createBlobSink("too-large.bin", BLOB_MAX_BYTES_IOS + 1),
+    ).toThrow(/too large/i);
+
+    vi.stubGlobal("navigator", {
+      userAgent: "Mozilla/5.0 (X11; Linux x86_64)",
+      platform: "Linux x86_64",
+    });
+    expect(() =>
+      createBlobSink("desktop-ok.bin", BLOB_MAX_BYTES_IOS + 1),
+    ).not.toThrow();
+  });
+
+  it("releases the blob parts after close", () => {
+    let capturedParts: BlobPart[] | undefined;
+    let capturedPartCount = 0;
+    class FakeBlob {
+      constructor(parts: BlobPart[]) {
+        capturedParts = parts;
+        capturedPartCount = parts.length;
+      }
+    }
+    vi.stubGlobal("Blob", FakeBlob);
+    vi.stubGlobal("URL", {
+      createObjectURL: () => "blob:fake",
+      revokeObjectURL: vi.fn(),
+    });
+    vi.stubGlobal("window", { setTimeout });
+    vi.stubGlobal("document", {
+      body: { append: vi.fn() },
+      createElement: () => ({ click: vi.fn(), remove: vi.fn() }),
+    });
+
+    const sink = createBlobSink("file.bin", 2);
+    sink.write(new Uint8Array([1]));
+    sink.write(new Uint8Array([2]));
+    sink.close();
+
+    if (capturedParts === undefined) {
+      throw new Error("The Blob constructor was not called.");
+    }
+    expect(capturedPartCount).toBe(2);
+    expect(capturedParts.length).toBe(0);
   });
 });
 

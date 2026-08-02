@@ -3,8 +3,46 @@ import type { Sink } from "./index";
 /** Blob fallback is deliberately capped because it retains the whole download in memory. */
 export const BLOB_MAX_BYTES = 500 * 1024 * 1024;
 
+/** iOS kills a tab near 200-300 MB with no warning, well under the desktop ceiling. */
+export const BLOB_MAX_BYTES_IOS = 150 * 1024 * 1024;
+
+interface BlobLimitEnvironment {
+  userAgent?: string;
+  platform?: string;
+  maxTouchPoints?: number;
+}
+
+const browserBlobLimitFeatures = (): BlobLimitEnvironment =>
+  typeof navigator === "undefined"
+    ? {}
+    : {
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        maxTouchPoints: navigator.maxTouchPoints,
+      };
+
+/**
+ * Returns the in-memory download ceiling for the current platform.
+ *
+ * iPadOS 13+ reports itself as `MacIntel`, so touch points are what separate it
+ * from a real Mac.
+ *
+ * @param environment - Platform signals; defaults to the live browser navigator.
+ * @returns The maximum number of bytes the blob sink will accept.
+ */
+export const blobMaxBytes = (
+  environment: BlobLimitEnvironment = browserBlobLimitFeatures(),
+): number => {
+  const userAgent = environment.userAgent ?? "";
+  const isIos =
+    /iPad|iPhone|iPod/.test(userAgent) ||
+    (environment.platform === "MacIntel" &&
+      (environment.maxTouchPoints ?? 0) > 1);
+  return isIos ? BLOB_MAX_BYTES_IOS : BLOB_MAX_BYTES;
+};
+
 export const createBlobSink = (name: string, totalBytes: number): Sink => {
-  if (totalBytes > BLOB_MAX_BYTES) {
+  if (totalBytes > blobMaxBytes()) {
     throw new Error(
       "This file is too large for the in-memory download fallback. Enable File System Access or service-worker downloads.",
     );
@@ -28,6 +66,8 @@ export const createBlobSink = (name: string, totalBytes: number): Sink => {
       }
       closed = true;
       const blob = new Blob(chunks, { type: "application/octet-stream" });
+      // The Blob constructor copies every part, so keeping both doubles peak memory.
+      chunks.length = 0;
       objectUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = objectUrl;
