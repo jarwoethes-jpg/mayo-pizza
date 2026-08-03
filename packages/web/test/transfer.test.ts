@@ -12,13 +12,27 @@ import {
   WatermarkFramePump,
 } from "../src/net/transfer";
 import {
+  OOM_MARKER_KEY,
+  readOomMarker,
   SINK_PROGRESS_WATCHDOG_MS,
   SINK_STALL_NOTICE_MS,
   SINK_SW_NO_CONSUMER_STALL_MS,
+  writeOomMarker,
 } from "../src/sink";
+
+const mockedSinkStrategy = vi.hoisted(() => ({
+  current: "blob" as "blob" | "sw",
+}));
+
+vi.mock("../src/sink", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/sink")>()),
+  getSinkStrategy: () => mockedSinkStrategy.current,
+}));
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
+  mockedSinkStrategy.current = "blob";
 });
 
 class FakeDataChannel implements DataChannelPumpTarget {
@@ -1057,6 +1071,189 @@ describe("transfer cancellation", () => {
       offset: 0,
       totalBytes: 128,
     });
+    controller.destroy();
+  });
+
+  it("fails a matching blob OOM marker before creating a worker", () => {
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    const onError = vi.fn();
+    const workerFactory = vi.fn(() => ({
+      onmessage: null,
+      onerror: null,
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    }));
+    const storage = {
+      value: null as string | null,
+      getItem: vi.fn(() => storage.value),
+      setItem: vi.fn((_key: string, value: string) => {
+        storage.value = value;
+      }),
+      removeItem: vi.fn(() => {
+        storage.value = null;
+      }),
+    };
+    vi.stubGlobal("sessionStorage", storage);
+    writeOomMarker({ name: "file.bin", totalBytes: 8 });
+    const peer = {
+      ctrl: { readyState: "open", send: vi.fn() },
+      data: {
+        readyState: "open",
+        bufferedAmount: 0,
+        send: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      },
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    createTransferController("downloader", peer as never, {
+      onError,
+      receiverWorkerFactory: workerFactory,
+    });
+
+    ctrlHandlers.get("manifest")?.({
+      t: "manifest",
+      transferId: "oom-transfer",
+      mode: "single",
+      items: [{ path: "file.bin", size: 8, lastModified: 0 }],
+      totalBytes: 8,
+      suggestedName: "file.bin",
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.stringContaining(
+          "This file was too large for this browser last time",
+        ),
+      }),
+    );
+    expect(workerFactory).not.toHaveBeenCalled();
+    expect(readOomMarker(storage)).toBeUndefined();
+    expect(storage.getItem).toHaveBeenCalledWith(OOM_MARKER_KEY);
+  });
+
+  it("clears a non-matching blob OOM marker and proceeds", () => {
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    const worker = {
+      onmessage: null,
+      onerror: null,
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    };
+    const workerFactory = vi.fn(() => worker);
+    const storage = {
+      value: null as string | null,
+      getItem: vi.fn(() => storage.value),
+      setItem: vi.fn((_key: string, value: string) => {
+        storage.value = value;
+      }),
+      removeItem: vi.fn(() => {
+        storage.value = null;
+      }),
+    };
+    vi.stubGlobal("sessionStorage", storage);
+    writeOomMarker({ name: "other.bin", totalBytes: 9 });
+    const peer = {
+      ctrl: { readyState: "open", send: vi.fn() },
+      data: {
+        readyState: "open",
+        bufferedAmount: 0,
+        send: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      },
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    const controller = createTransferController("downloader", peer as never, {
+      receiverWorkerFactory: workerFactory,
+    });
+
+    ctrlHandlers.get("manifest")?.({
+      t: "manifest",
+      transferId: "normal-transfer",
+      mode: "single",
+      items: [{ path: "file.bin", size: 8, lastModified: 0 }],
+      totalBytes: 8,
+      suggestedName: "file.bin",
+    });
+
+    expect(readOomMarker(storage)).toBeUndefined();
+    expect(workerFactory).toHaveBeenCalledOnce();
+    expect(worker.postMessage).toHaveBeenCalledWith({
+      t: "init",
+      transferId: "normal-transfer",
+      offset: 0,
+      totalBytes: 8,
+    });
+    controller.destroy();
+  });
+
+  it("clears a matching OOM marker and proceeds when the strategy is not blob", () => {
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    const worker = {
+      onmessage: null,
+      onerror: null,
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    };
+    const workerFactory = vi.fn(() => worker);
+    const onError = vi.fn();
+    const storage = {
+      value: null as string | null,
+      getItem: vi.fn(() => storage.value),
+      setItem: vi.fn((_key: string, value: string) => {
+        storage.value = value;
+      }),
+      removeItem: vi.fn(() => {
+        storage.value = null;
+      }),
+    };
+    vi.stubGlobal("sessionStorage", storage);
+    mockedSinkStrategy.current = "sw";
+    writeOomMarker({ name: "file.bin", totalBytes: 8 });
+    const peer = {
+      ctrl: { readyState: "open", send: vi.fn() },
+      data: {
+        readyState: "open",
+        bufferedAmount: 0,
+        send: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      },
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    const controller = createTransferController("downloader", peer as never, {
+      onError,
+      receiverWorkerFactory: workerFactory,
+    });
+
+    ctrlHandlers.get("manifest")?.({
+      t: "manifest",
+      transferId: "sw-oom-transfer",
+      mode: "single",
+      items: [{ path: "file.bin", size: 8, lastModified: 0 }],
+      totalBytes: 8,
+      suggestedName: "file.bin",
+    });
+
+    expect(readOomMarker(storage)).toBeUndefined();
+    expect(onError).not.toHaveBeenCalled();
+    expect(workerFactory).toHaveBeenCalledOnce();
     controller.destroy();
   });
 

@@ -1,4 +1,5 @@
 import type { Sink } from "./index";
+import { clearOomMarker, writeOomMarker } from "./oomMarker";
 
 /** Blob fallback is deliberately capped because it retains the whole download in memory. */
 export const BLOB_MAX_BYTES = 500 * 1024 * 1024;
@@ -53,6 +54,15 @@ export const createBlobSink = (name: string, totalBytes: number): Sink => {
   const chunks: BlobPart[] = [];
   let closed = false;
   let objectUrl: string | undefined;
+  let pagehideListener: (() => void) | undefined;
+
+  const clearDownloadMarker = (): void => {
+    clearOomMarker();
+    if (typeof window !== "undefined" && pagehideListener !== undefined) {
+      window.removeEventListener("pagehide", pagehideListener);
+      pagehideListener = undefined;
+    }
+  };
 
   return {
     strategy: "blob",
@@ -67,7 +77,12 @@ export const createBlobSink = (name: string, totalBytes: number): Sink => {
         return;
       }
       closed = true;
+      writeOomMarker({ name, totalBytes });
       const blob = new Blob(chunks, { type: "application/octet-stream" });
+      if (typeof window !== "undefined") {
+        pagehideListener = clearDownloadMarker;
+        window.addEventListener("pagehide", pagehideListener);
+      }
       // The Blob constructor copies every part, so keeping both doubles peak memory.
       chunks.length = 0;
       objectUrl = URL.createObjectURL(blob);
@@ -83,11 +98,13 @@ export const createBlobSink = (name: string, totalBytes: number): Sink => {
           URL.revokeObjectURL(objectUrl);
           objectUrl = undefined;
         }
+        clearDownloadMarker();
       }, 30_000);
     },
     cancel(): void {
       closed = true;
       chunks.length = 0;
+      clearDownloadMarker();
       if (objectUrl !== undefined) {
         URL.revokeObjectURL(objectUrl);
         objectUrl = undefined;

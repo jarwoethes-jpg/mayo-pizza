@@ -11,6 +11,9 @@ import {
   createSwCreditState,
   detectSinkStrategy,
   isNextSwSequence,
+  matchesOomMarker,
+  OOM_MARKER_KEY,
+  readOomMarker,
   releaseSwCredit,
   SINK_PROGRESS_WATCHDOG_MS,
   SINK_STALL_ABORT_MS,
@@ -22,6 +25,7 @@ import {
   SinkManager,
   SwNoConsumerStallError,
   SwStreamSink,
+  writeOomMarker,
 } from "../src/sink";
 import {
   createSwSink,
@@ -203,7 +207,11 @@ describe("blob sink limits", () => {
       createObjectURL: () => "blob:fake",
       revokeObjectURL: vi.fn(),
     });
-    vi.stubGlobal("window", { setTimeout });
+    vi.stubGlobal("window", {
+      setTimeout,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
     vi.stubGlobal("document", {
       body: { append: vi.fn() },
       createElement: () => ({ click: vi.fn(), remove: vi.fn() }),
@@ -219,6 +227,216 @@ describe("blob sink limits", () => {
     }
     expect(capturedPartCount).toBe(2);
     expect(capturedParts.length).toBe(0);
+  });
+});
+
+describe("blob OOM marker", () => {
+  const createStorage = () => {
+    let value: string | null = null;
+    return {
+      getItem: vi.fn(() => value),
+      setItem: vi.fn((_key: string, nextValue: string) => {
+        value = nextValue;
+      }),
+      removeItem: vi.fn(() => {
+        value = null;
+      }),
+    };
+  };
+
+  it("writes before Blob construction and clears after the 30-second timer", async () => {
+    vi.useFakeTimers();
+    const storage = createStorage();
+    const order: string[] = [];
+    vi.stubGlobal("sessionStorage", storage);
+    class FakeBlob {
+      constructor() {
+        order.push("blob");
+        expect(readOomMarker(storage)).toEqual({
+          name: "file.bin",
+          totalBytes: 2,
+        });
+      }
+    }
+    vi.stubGlobal("Blob", FakeBlob);
+    vi.stubGlobal("URL", {
+      createObjectURL: () => "blob:fake",
+      revokeObjectURL: vi.fn(),
+    });
+    vi.stubGlobal("window", {
+      setTimeout,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    vi.stubGlobal("document", {
+      body: { append: vi.fn() },
+      createElement: () => ({
+        click: () => {
+          order.push("click");
+          expect(readOomMarker(storage)).toEqual({
+            name: "file.bin",
+            totalBytes: 2,
+          });
+        },
+        remove: vi.fn(),
+      }),
+    });
+    storage.setItem.mockImplementation((_key, nextValue) => {
+      order.push("write");
+      (storage.getItem as ReturnType<typeof vi.fn>).mockReturnValue(nextValue);
+    });
+    storage.removeItem.mockImplementation(() => {
+      order.push("clear");
+      (storage.getItem as ReturnType<typeof vi.fn>).mockReturnValue(null);
+    });
+
+    const sink = createBlobSink("file.bin", 2);
+    sink.close();
+
+    expect(order).toEqual(["write", "blob", "click"]);
+    expect(readOomMarker(storage)).toEqual({
+      name: "file.bin",
+      totalBytes: 2,
+    });
+    expect(storage.getItem).toHaveBeenCalledWith(OOM_MARKER_KEY);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(order).toEqual(["write", "blob", "click", "clear"]);
+    expect(readOomMarker(storage)).toBeUndefined();
+  });
+
+  it("clears the marker when cancelled", () => {
+    const storage = createStorage();
+    vi.stubGlobal("sessionStorage", storage);
+    writeOomMarker({ name: "file.bin", totalBytes: 2 });
+
+    const sink = createBlobSink("file.bin", 2);
+    sink.cancel("user cancelled");
+
+    expect(readOomMarker(storage)).toBeUndefined();
+  });
+
+  it("clears the marker from the pagehide listener", () => {
+    const storage = createStorage();
+    let pagehide: (() => void) | undefined;
+    vi.stubGlobal("sessionStorage", storage);
+    vi.stubGlobal("URL", {
+      createObjectURL: () => "blob:fake",
+      revokeObjectURL: vi.fn(),
+    });
+    vi.stubGlobal("window", {
+      setTimeout,
+      addEventListener: vi.fn((type: string, listener: () => void) => {
+        if (type === "pagehide") {
+          pagehide = listener;
+        }
+      }),
+      removeEventListener: vi.fn(),
+    });
+    vi.stubGlobal("document", {
+      body: { append: vi.fn() },
+      createElement: () => ({ click: vi.fn(), remove: vi.fn() }),
+    });
+
+    const sink = createBlobSink("file.bin", 2);
+    sink.close();
+
+    expect(readOomMarker(storage)).toEqual({
+      name: "file.bin",
+      totalBytes: 2,
+    });
+
+    if (pagehide === undefined) {
+      throw new Error("The pagehide listener was not registered.");
+    }
+    pagehide();
+
+    expect(readOomMarker(storage)).toBeUndefined();
+    expect(window.removeEventListener).toHaveBeenCalledWith(
+      "pagehide",
+      expect.any(Function),
+    );
+  });
+
+  it.each([
+    "not JSON",
+    JSON.stringify({ name: "file.bin" }),
+    JSON.stringify({ name: "file.bin", totalBytes: -1 }),
+    '{"name":"file.bin","totalBytes":1e999}',
+  ])("rejects invalid marker JSON: %s", (value) => {
+    const storage = {
+      getItem: vi.fn(() => value),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    };
+
+    expect(readOomMarker(storage)).toBeUndefined();
+  });
+
+  it("does not let throwing sessionStorage access break close", () => {
+    const originalDescriptor = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "sessionStorage",
+    );
+    vi.stubGlobal("URL", {
+      createObjectURL: () => "blob:fake",
+      revokeObjectURL: vi.fn(),
+    });
+    vi.stubGlobal("window", {
+      setTimeout,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    vi.stubGlobal("document", {
+      body: { append: vi.fn() },
+      createElement: () => ({ click: vi.fn(), remove: vi.fn() }),
+    });
+
+    const restoreStorage = (): void => {
+      if (originalDescriptor === undefined) {
+        Reflect.deleteProperty(globalThis, "sessionStorage");
+      } else {
+        Object.defineProperty(globalThis, "sessionStorage", originalDescriptor);
+      }
+    };
+
+    try {
+      Object.defineProperty(globalThis, "sessionStorage", {
+        configurable: true,
+        get: () => {
+          throw new Error("storage getter failed");
+        },
+      });
+      expect(() => createBlobSink("getter.bin", 1).close()).not.toThrow();
+
+      Object.defineProperty(globalThis, "sessionStorage", {
+        configurable: true,
+        value: {
+          getItem: () => {
+            throw new Error("storage get failed");
+          },
+          setItem: () => {
+            throw new Error("storage setter failed");
+          },
+          removeItem: () => {
+            throw new Error("storage remove failed");
+          },
+        },
+      });
+      expect(() => createBlobSink("setter.bin", 1).close()).not.toThrow();
+    } finally {
+      restoreStorage();
+    }
+  });
+
+  it("matches markers exactly on name and size", () => {
+    const marker = { name: "file.bin", totalBytes: 2 };
+
+    expect(matchesOomMarker(marker, "file.bin", 2)).toBe(true);
+    expect(matchesOomMarker(marker, "other.bin", 2)).toBe(false);
+    expect(matchesOomMarker(marker, "file.bin", 3)).toBe(false);
+    expect(matchesOomMarker(undefined, "file.bin", 2)).toBe(false);
   });
 });
 

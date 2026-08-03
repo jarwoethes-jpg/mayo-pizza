@@ -204,6 +204,14 @@ export {
   SwNoConsumerStallError,
 } from "./manager";
 export {
+  clearOomMarker,
+  matchesOomMarker,
+  OOM_MARKER_KEY,
+  type OomMarker,
+  readOomMarker,
+  writeOomMarker,
+} from "./oomMarker";
+export {
   consumeSwCredit,
   createSwCreditState,
   isNextSwSequence,

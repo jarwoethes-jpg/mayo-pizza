@@ -4,9 +4,13 @@ import type { FolderEntry } from "../folder/entries";
 import { makeZipPlan, ZIP_DIRECTORY_LAST_MODIFIED } from "../folder/zipPlan";
 import {
   blobMaxBytes,
+  clearOomMarker,
   createBlobSink,
   createSink,
+  getSinkStrategy,
   isSwNoConsumerStallError,
+  matchesOomMarker,
+  readOomMarker,
   SINK_PROGRESS_WATCHDOG_MS,
   type Sink,
   type SinkFactory,
@@ -641,6 +645,21 @@ export class TransferController {
           : "Only a single-file manifest is supported.",
       );
       return;
+    }
+    const marker = readOomMarker();
+    if (marker !== undefined) {
+      // Cleared outside the strategy gate: the blob sink also runs as the sw-stall
+      // fallback, so a gated clear leaves the key for the tab's lifetime on an sw page.
+      clearOomMarker();
+      if (
+        getSinkStrategy() === "blob" &&
+        matchesOomMarker(marker, message.suggestedName, message.totalBytes)
+      ) {
+        this.fail(
+          "This file was too large for this browser last time — the tab ran out of memory. Open this link in Chrome or Firefox on a desktop to receive it.",
+        );
+        return;
+      }
     }
     this.teardownActiveTransfer();
     this.transferId = message.transferId;
