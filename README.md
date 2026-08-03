@@ -1,5 +1,10 @@
 # mayo.pizza
 
+[![CI](https://github.com/jarwoethes-jpg/mayo-pizza/actions/workflows/ci.yml/badge.svg)](https://github.com/jarwoethes-jpg/mayo-pizza/actions/workflows/ci.yml)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue.svg)](LICENSE)
+
+Running at **[mayo.pizza](https://mayo.pizza)**.
+
 mayo.pizza is a capability-URL transfer tool: the browser creates a short-lived room, peers negotiate through a small Fastify + `ws` signaling service, and the file travels over an encrypted WebRTC data channel. The service keeps room state in memory and does not need Redis; it snapshots that state to a JSON file on disk, so active rooms survive a process restart.
 
 ## Architecture
@@ -48,7 +53,7 @@ pnpm --filter web build
 pnpm --filter web preview --host 127.0.0.1 --port 5173 --strictPort
 ```
 
-Run the e2e suite on a host with TCP bind permission and installed browser binaries. The restricted executor used for this change cannot run that browser/network gate.
+Run the e2e suite on a host with TCP bind permission and installed browser binaries. A sandbox that cannot bind TCP will skip that gate silently rather than fail, so a green result from one is not evidence.
 
 Recreate the e2e fixtures with the deterministic generator. The default tier creates every fixture except the 1 GiB `MAYO_TEST_FILE`; add `--full` when the transfer and resume gates need it. The generator creates the ZIP64 input sparsely and verifies its structure and hashes automatically:
 
@@ -159,7 +164,7 @@ Rotation invalidates the old shared secret. In-flight relayed sessions break and
 
 ## Logs, retention, and privacy
 
-The app writes structured JSON logs to stdout through Docker's `journald` driver, so the host journal keeps them across app container recreation and host reboot. Operator note: the orchestrator must set `RateLimitIntervalSec=0` (or a high `RateLimitBurst`) so room events are never dropped, and `MaxRetentionSec=7d` so retention matches the privacy-page claim. These are host settings; do not apply them from this repo. Caddy and coturn logs are available through `docker compose logs caddy` and `docker compose logs coturn`; their host-side retention is not configured by this stack.
+The app writes structured JSON logs to stdout through Docker's `journald` driver, so the host journal keeps them across app container recreation and host reboot. Operator note: set `RateLimitIntervalSec=0` (or a high `RateLimitBurst`) so room events are never dropped, and `MaxRetentionSec=7d` so retention matches the privacy-page claim. These are host settings; do not apply them from this repo. Caddy and coturn logs are available through `docker compose logs caddy` and `docker compose logs coturn`; their host-side retention is not configured by this stack.
 
 The privacy guarantee is that app logs do not contain room slugs, uploader tokens, or filenames. Phase 8a enforces the slug/filename rule with a test. Rooms and transfer state remain in memory only.
 
