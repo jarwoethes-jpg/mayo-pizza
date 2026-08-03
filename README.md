@@ -1,5 +1,8 @@
 <p align="center">
-  <img src=".github/logo-lockup.svg" alt="mayo.pizza" width="420">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/logo-lockup-dark.svg">
+    <img src=".github/logo-lockup.svg" alt="mayo.pizza" width="420">
+  </picture>
 </p>
 
 # mayo.pizza
