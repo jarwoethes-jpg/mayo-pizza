@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="packages/web/public/brand/logo-lockup.svg" alt="mayo.pizza" width="420">
+  <img src=".github/logo-lockup.svg" alt="mayo.pizza" width="420">
 </p>
 
 # mayo.pizza
