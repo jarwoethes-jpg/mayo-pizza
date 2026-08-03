@@ -7,3 +7,7 @@ pnpm-debug.log
 .env
 .env.*
 !.env.example
+
+# macOS AppleDouble resource forks, created when the tree is copied over SMB/AFP.
+._*
+.DS_Store
