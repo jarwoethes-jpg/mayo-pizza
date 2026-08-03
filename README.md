@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="packages/web/public/brand/logo-lockup.svg" alt="mayo.pizza" width="420">
+</p>
+
 # mayo.pizza
 
 [![CI](https://github.com/jarwoethes-jpg/mayo-pizza/actions/workflows/ci.yml/badge.svg)](https://github.com/jarwoethes-jpg/mayo-pizza/actions/workflows/ci.yml)
@@ -212,6 +216,12 @@ env URL=ws://127.0.0.1:3100/ws SERVER_PID=<server-pid> METRICS_TOKEN=<matching-t
 ```
 
 For the room-reaper gate, also set a short positive `ROOM_TTL_MS` in the server and harness environment. The harness passes when it reports no fatal/error condition, all rooms are reaped when the reaper check is enabled, and final RSS is no more than 1.5 times the warm-up RSS. Review the JSON summary and `/tmp/mayo-loadtest.jsonl`; do not treat a run with a metrics error as a pass.
+
+## Support
+
+mayo.pizza is free and ad-free. If it saved you a transfer, you can buy me a coffee:
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/mayonesss)
 
 ## License
 
