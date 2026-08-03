@@ -11,7 +11,11 @@ import {
   splitBuffer,
   WatermarkFramePump,
 } from "../src/net/transfer";
-import { SINK_PROGRESS_WATCHDOG_MS, SINK_STALL_NOTICE_MS } from "../src/sink";
+import {
+  SINK_PROGRESS_WATCHDOG_MS,
+  SINK_STALL_NOTICE_MS,
+  SINK_SW_NO_CONSUMER_STALL_MS,
+} from "../src/sink";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -1150,6 +1154,149 @@ describe("transfer cancellation", () => {
 });
 
 describe("receiver sink stall watchdog", () => {
+  it("restarts a stalled service-worker sink once with the blob sink", async () => {
+    vi.useFakeTimers();
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    const sent: unknown[] = [];
+    const workers: Array<{
+      onmessage: ((event: MessageEvent<unknown>) => void) | null;
+      onerror: ((event: ErrorEvent) => void) | null;
+      postMessage: ReturnType<typeof vi.fn>;
+      terminate: ReturnType<typeof vi.fn>;
+    }> = [];
+    const receiverWorkerFactory = vi.fn(() => {
+      const worker = {
+        onmessage: null as ((event: MessageEvent<unknown>) => void) | null,
+        onerror: null as ((event: ErrorEvent) => void) | null,
+        postMessage: vi.fn(),
+        terminate: vi.fn(),
+      };
+      workers.push(worker);
+      return worker;
+    });
+    const data = {
+      readyState: "open",
+      bufferedAmount: 0,
+      send: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    };
+    const peer = {
+      ctrl: {
+        readyState: "open",
+        send: (message: unknown) => sent.push(message),
+      },
+      data,
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    const swCancel = vi.fn();
+    let writtenBytes = 0;
+    const sinkFactory = vi.fn(() => ({
+      strategy: "sw" as const,
+      write: (bytes: Uint8Array) => {
+        if (writtenBytes >= 4) {
+          return new Promise<void>(() => {});
+        }
+        writtenBytes += bytes.byteLength;
+        return Promise.resolve();
+      },
+      close: vi.fn(),
+      cancel: swCancel,
+    }));
+    const onResumeRequested = vi.fn();
+    const onSinkStall = vi.fn();
+    const controller = createTransferController("downloader", peer as never, {
+      onResumeRequested,
+      onSinkStall,
+      receiverWorkerFactory,
+      sinkFactory,
+    });
+    const manifest = {
+      t: "manifest" as const,
+      transferId: "transfer-sw-fallback",
+      mode: "single" as const,
+      items: [{ path: "file.bin", size: 8, lastModified: 0 }],
+      totalBytes: 8,
+      suggestedName: "file.bin",
+    };
+
+    ctrlHandlers.get("manifest")?.(manifest);
+    controller.acceptTransfer();
+    await Promise.resolve();
+    expect(sinkFactory).toHaveBeenCalledWith("file.bin", 8);
+    expect(sent).toContainEqual({
+      t: "request",
+      transferId: manifest.transferId,
+      offset: 0,
+    });
+
+    const firstWorker = workers[0];
+    if (firstWorker === undefined) {
+      throw new Error("The receiver worker was not created.");
+    }
+    ctrlHandlers.get("start")?.({
+      t: "start",
+      transferId: manifest.transferId,
+      offset: 0,
+    });
+    ctrlHandlers.get("done")?.({
+      t: "done",
+      transferId: manifest.transferId,
+      sha256: "hash",
+    });
+    const emitChunk = (
+      worker: (typeof workers)[number],
+      chunkId: string,
+      byteLength: number,
+    ): void => {
+      worker.onmessage?.({
+        data: {
+          t: "chunk",
+          chunkId,
+          buffer: new ArrayBuffer(byteLength),
+          bytesDone: byteLength,
+          totalBytes: 8,
+        },
+      } as MessageEvent<unknown>);
+    };
+    emitChunk(firstWorker, "0", 4);
+    await Promise.resolve();
+    emitChunk(firstWorker, "1", 1);
+
+    await vi.advanceTimersByTimeAsync(SINK_SW_NO_CONSUMER_STALL_MS);
+
+    expect(swCancel).toHaveBeenCalledWith(
+      "Restarting the download with a browser fallback.",
+    );
+    expect(firstWorker.terminate).toHaveBeenCalledOnce();
+    expect(receiverWorkerFactory).toHaveBeenCalledTimes(2);
+    expect(sinkFactory).toHaveBeenCalledTimes(1);
+    expect(
+      sent.filter((message) => (message as { t?: string }).t === "request"),
+    ).toEqual([
+      { t: "request", transferId: manifest.transferId, offset: 0 },
+      { t: "request", transferId: manifest.transferId, offset: 0 },
+    ]);
+    expect(onResumeRequested).toHaveBeenCalledOnce();
+    expect(onSinkStall).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stalled: true,
+        reason: "sw-no-consumer",
+      }),
+    );
+
+    await vi.advanceTimersByTimeAsync(SINK_SW_NO_CONSUMER_STALL_MS);
+    expect(
+      sent.filter((message) => (message as { t?: string }).t === "request"),
+    ).toHaveLength(2);
+    controller.destroy();
+  });
+
   it("does not fail a finishing transfer while the sink is stalled", async () => {
     vi.useFakeTimers();
     const harness = await createReceiverStallHarness();

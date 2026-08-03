@@ -16,11 +16,18 @@ import {
   SINK_STALL_ABORT_MS,
   SINK_STALL_NOTICE_MS,
   SINK_START_TIMEOUT_MS,
+  SINK_SW_NO_CONSUMER_MAX_COMMITTED_BYTES,
+  SINK_SW_NO_CONSUMER_STALL_MS,
   type Sink,
   SinkManager,
+  SwNoConsumerStallError,
   SwStreamSink,
 } from "../src/sink";
-import { createSwSink } from "../src/sink/swStream";
+import {
+  createSwSink,
+  SW_PROTOCOL_VERSION,
+  warmUpSwServiceWorker,
+} from "../src/sink/swStream";
 import type { ReceiverWorkerEvent } from "../src/worker/messages";
 import { ReceiverProcessor } from "../src/worker/receiverLogic";
 
@@ -324,6 +331,149 @@ describe("bounded sink manager", () => {
     await rejection;
   });
 
+  it("surfaces a stalled service-worker consumer as a fast recoverable error", async () => {
+    vi.useFakeTimers();
+    let writtenBytes = 0;
+    const sink = {
+      strategy: "sw" as const,
+      write: (bytes: Uint8Array) => {
+        if (writtenBytes >= 4) {
+          return new Promise<void>(() => {});
+        }
+        writtenBytes += bytes.byteLength;
+        return Promise.resolve();
+      },
+      close: vi.fn(),
+      cancel: vi.fn(),
+      isResponsive: () => true,
+    };
+    const stalls: Array<
+      { stalled: boolean; sinceMs: number; reason?: string } | undefined
+    > = [];
+    const manager = new SinkManager(sink, {
+      onStallChange: (stall) => stalls.push(stall),
+    });
+
+    await expect(
+      manager.write(new Uint8Array([1, 2, 3, 4])),
+    ).resolves.toBeUndefined();
+    const stalledWrite = manager.write(new Uint8Array([5]));
+    const rejection = expect(stalledWrite).rejects.toBeInstanceOf(
+      SwNoConsumerStallError,
+    );
+
+    await vi.advanceTimersByTimeAsync(SINK_SW_NO_CONSUMER_STALL_MS);
+
+    await rejection;
+    expect(stalls).toContainEqual({
+      stalled: true,
+      sinceMs: expect.any(Number),
+      reason: "sw-no-consumer",
+    });
+    expect(SINK_SW_NO_CONSUMER_STALL_MS).toBeLessThan(SINK_STALL_ABORT_MS);
+  });
+
+  it("keeps an unresponsive service-worker stall on its long error path", async () => {
+    vi.useFakeTimers();
+    let writeCount = 0;
+    const sink = {
+      strategy: "sw" as const,
+      write: () => {
+        writeCount += 1;
+        return writeCount === 1
+          ? Promise.resolve()
+          : new Promise<void>(() => {});
+      },
+      close: vi.fn(),
+      cancel: vi.fn(),
+      isResponsive: () => false,
+    };
+    const manager = new SinkManager(sink);
+    await expect(manager.write(new Uint8Array([1]))).resolves.toBeUndefined();
+    const stalledWrite = manager.write(new Uint8Array([2]));
+    let settled = false;
+    void stalledWrite.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    const errorPromise = stalledWrite.catch((error: unknown) => error);
+
+    await vi.advanceTimersByTimeAsync(SINK_SW_NO_CONSUMER_STALL_MS);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(
+      SINK_STALL_ABORT_MS - SINK_SW_NO_CONSUMER_STALL_MS,
+    );
+
+    const error = await errorPromise;
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(SwNoConsumerStallError);
+    expect((error as Error).message).toBe(
+      "The download service worker stopped responding.",
+    );
+  });
+
+  it("uses the fast budget at the committed-byte ceiling but not above it", async () => {
+    vi.useFakeTimers();
+    const createStalledManager = () => {
+      let writeCount = 0;
+      const sink = {
+        strategy: "sw" as const,
+        write: () => {
+          writeCount += 1;
+          return writeCount === 1
+            ? Promise.resolve()
+            : new Promise<void>(() => {});
+        },
+        close: vi.fn(),
+        cancel: vi.fn(),
+        isResponsive: () => true,
+      };
+      return new SinkManager(sink);
+    };
+
+    const atCeiling = createStalledManager();
+    await expect(
+      atCeiling.write(new Uint8Array(SINK_SW_NO_CONSUMER_MAX_COMMITTED_BYTES)),
+    ).resolves.toBeUndefined();
+    const fastStall = atCeiling.write(new Uint8Array([1]));
+    const fastError = fastStall.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(SINK_SW_NO_CONSUMER_STALL_MS);
+    expect(await fastError).toBeInstanceOf(SwNoConsumerStallError);
+
+    const aboveCeiling = createStalledManager();
+    await expect(
+      aboveCeiling.write(
+        new Uint8Array(SINK_SW_NO_CONSUMER_MAX_COMMITTED_BYTES + 1),
+      ),
+    ).resolves.toBeUndefined();
+    const slowStall = aboveCeiling.write(new Uint8Array([1]));
+    let slowSettled = false;
+    void slowStall.then(
+      () => {
+        slowSettled = true;
+      },
+      () => {
+        slowSettled = true;
+      },
+    );
+    const slowError = slowStall.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(SINK_SW_NO_CONSUMER_STALL_MS);
+    expect(slowSettled).toBe(false);
+    await vi.advanceTimersByTimeAsync(
+      SINK_STALL_ABORT_MS - SINK_SW_NO_CONSUMER_STALL_MS,
+    );
+    const slowFailure = await slowError;
+    expect(slowFailure).toBeInstanceOf(Error);
+    expect(slowFailure).not.toBeInstanceOf(SwNoConsumerStallError);
+    expect((slowFailure as Error).message).toBe(
+      "The download has been paused for too long. Your browser stopped accepting data.",
+    );
+  });
+
   it("calls cancel while a write is still pending", async () => {
     let resolveWrite: (() => void) | undefined;
     const cancel = vi.fn();
@@ -500,6 +650,14 @@ interface PendingSwSinkHarness {
   start: Promise<Sink>;
 }
 
+interface SwActivationHarness {
+  active: { postMessage: ReturnType<typeof vi.fn> };
+  append: ReturnType<typeof vi.fn>;
+  events: string[];
+  sendMessage: (message: unknown) => void;
+  warmup: () => Promise<void>;
+}
+
 const SW_STARTED_TIMEOUT_MS = 10_000;
 
 const createPendingSwSinkHarness = (
@@ -512,7 +670,7 @@ const createPendingSwSinkHarness = (
       listeners.set(type, listener),
     removeEventListener: (type: string) => listeners.delete(type),
     register: vi.fn(async () => ({ active })),
-    controller,
+    controller: controller === null ? null : active,
   };
   const append = vi.fn();
   vi.stubGlobal("navigator", { serviceWorker });
@@ -542,6 +700,54 @@ const createPendingSwSinkHarness = (
     },
     start,
   };
+};
+
+const createSwActivationHarness = (
+  controller: object | null,
+): SwActivationHarness => {
+  const listeners = new Map<string, (event: MessageEvent) => void>();
+  const events: string[] = [];
+  const active = {
+    postMessage: vi.fn((message: { t?: string }) => {
+      events.push(`post:${message.t ?? "unknown"}`);
+    }),
+  };
+  const serviceWorker = {
+    addEventListener: (type: string, listener: (event: MessageEvent) => void) =>
+      listeners.set(type, listener),
+    removeEventListener: (type: string) => listeners.delete(type),
+    register: vi.fn(async () => ({ active })),
+    controller: controller === null ? null : active,
+  };
+  const append = vi.fn(() => events.push("append"));
+  vi.stubGlobal("navigator", { serviceWorker });
+  vi.stubGlobal("window", {
+    clearInterval,
+    clearTimeout,
+    setInterval,
+    setTimeout,
+  });
+  vi.stubGlobal("document", {
+    body: { append },
+    createElement: () => ({ remove: vi.fn() }),
+  });
+  return {
+    active,
+    append,
+    events,
+    sendMessage: (message) =>
+      listeners.get("message")?.({ data: message } as MessageEvent),
+    warmup: () => warmUpSwServiceWorker(),
+  };
+};
+
+const negotiateWarmup = async (harness: SwActivationHarness): Promise<void> => {
+  const warmup = harness.warmup();
+  await vi.waitFor(() =>
+    expect(harness.active.postMessage).toHaveBeenCalledWith({ t: "hello" }),
+  );
+  harness.sendMessage({ t: "hello-ack", protocol: SW_PROTOCOL_VERSION });
+  await warmup;
 };
 
 const createSwSinkHarness = async (): Promise<SwSinkHarness> => {
@@ -593,6 +799,74 @@ const createSwSinkHarness = async (): Promise<SwSinkHarness> => {
 };
 
 describe("service-worker started handshake", () => {
+  it("posts init and appends the iframe in the same task on the negotiated fast path", async () => {
+    const harness = createSwActivationHarness({});
+    await negotiateWarmup(harness);
+
+    const sink = new SwStreamSink("file.bin", 2);
+    const start = sink.start();
+    expect(harness.events.slice(-2)).toEqual(["post:init", "append"]);
+
+    const initCall = harness.active.postMessage.mock.calls.find(
+      (call) =>
+        typeof call[0] === "object" &&
+        call[0] !== null &&
+        "t" in call[0] &&
+        call[0].t === "init",
+    );
+    if (initCall === undefined) {
+      throw new Error("The fast path did not send init.");
+    }
+    const id = (initCall[0] as { id: string }).id;
+    harness.sendMessage({ t: "ready", id, creditBytes: 8 });
+    harness.sendMessage({ t: "started", id });
+    await expect(start).resolves.toBeUndefined();
+  });
+
+  it("surfaces the started diagnostic when the negotiated worker never replies", async () => {
+    vi.useFakeTimers();
+    const harness = createSwActivationHarness({});
+    await negotiateWarmup(harness);
+
+    const sink = new SwStreamSink("file.bin", 2);
+    const start = sink.start();
+    const rejection = expect(start).rejects.toThrow(
+      /The download service worker never received the download request \(controller=active, path=\/__mayo-dl\/[^)]+\)\./,
+    );
+
+    await vi.advanceTimersByTimeAsync(SW_STARTED_TIMEOUT_MS);
+    await rejection;
+  });
+
+  it("keeps legacy ordering when the page is not controlled", async () => {
+    const harness = createSwActivationHarness(null);
+    await negotiateWarmup(harness);
+
+    const sink = new SwStreamSink("file.bin", 2);
+    const start = sink.start();
+    await vi.waitFor(() =>
+      expect(harness.active.postMessage).toHaveBeenCalledTimes(2),
+    );
+    expect(harness.events.slice(-1)).toEqual(["post:init"]);
+    expect(harness.append).not.toHaveBeenCalled();
+
+    const initCall = harness.active.postMessage.mock.calls.find(
+      (call) =>
+        typeof call[0] === "object" &&
+        call[0] !== null &&
+        "t" in call[0] &&
+        call[0].t === "init",
+    );
+    if (initCall === undefined) {
+      throw new Error("The legacy path did not send init.");
+    }
+    const id = (initCall[0] as { id: string }).id;
+    harness.sendMessage({ t: "ready", id, creditBytes: 8 });
+    await vi.waitFor(() => expect(harness.append).toHaveBeenCalledOnce());
+    harness.sendMessage({ t: "started", id });
+    await expect(start).resolves.toBeUndefined();
+  });
+
   it("resolves createSwSink after started and installs the ping timer", async () => {
     vi.useFakeTimers();
     const serviceWorkerHarness = createSwTestHarness(0);
@@ -604,6 +878,7 @@ describe("service-worker started handshake", () => {
       expect(harness.active.postMessage).toHaveBeenCalledOnce(),
     );
     harness.sendMessage({ t: "ready", creditBytes: 8 });
+    expect(harness.append).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(harness.append).toHaveBeenCalledOnce());
     harness.sendMessage({ t: "started" });
 
@@ -650,6 +925,64 @@ describe("service-worker started handshake", () => {
     );
     await vi.advanceTimersByTimeAsync(SW_STARTED_TIMEOUT_MS);
     await rejection;
+  });
+});
+
+describe("service-worker warm-up", () => {
+  it("is idempotent and caches the negotiated protocol", async () => {
+    const listeners = new Map<string, (event: MessageEvent) => void>();
+    const active = { postMessage: vi.fn() };
+    const serviceWorker = {
+      addEventListener: (
+        type: string,
+        listener: (event: MessageEvent) => void,
+      ) => listeners.set(type, listener),
+      removeEventListener: (type: string) => listeners.delete(type),
+      register: vi.fn(async () => ({ active })),
+      controller: active,
+    };
+    vi.stubGlobal("navigator", { serviceWorker });
+    vi.stubGlobal("window", {});
+
+    const first = warmUpSwServiceWorker();
+    const second = warmUpSwServiceWorker();
+    expect(second).toBe(first);
+    await vi.waitFor(() =>
+      expect(active.postMessage).toHaveBeenCalledWith({ t: "hello" }),
+    );
+    listeners.get("message")?.({
+      data: { t: "hello-ack", protocol: SW_PROTOCOL_VERSION },
+    } as MessageEvent);
+
+    await expect(first).resolves.toBeUndefined();
+    expect(serviceWorker.register).toHaveBeenCalledOnce();
+  });
+
+  it("does not throw when registration fails", async () => {
+    const serviceWorker = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      register: vi.fn(async () => {
+        throw new Error("registration failed");
+      }),
+    };
+    vi.stubGlobal("navigator", { serviceWorker });
+    vi.stubGlobal("window", {});
+
+    await expect(warmUpSwServiceWorker()).resolves.toBeUndefined();
+  });
+
+  it("does not register when a sink override is injected", async () => {
+    const serviceWorker = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      register: vi.fn(),
+    };
+    vi.stubGlobal("navigator", { serviceWorker });
+    vi.stubGlobal("window", { __MAYO_SINK__: { strategy: "sw" } });
+
+    await warmUpSwServiceWorker();
+    expect(serviceWorker.register).not.toHaveBeenCalled();
   });
 });
 
@@ -831,6 +1164,114 @@ const createSwTestHarness = (totalBytes: number): SwTestHarness => {
   };
 };
 
+interface SwParkingHarness {
+  outbound: unknown[];
+  fetch: (id: string) => Promise<{
+    status: number;
+    headers: Record<string, string>;
+  }>;
+  sendMessage: (data: unknown) => void;
+}
+
+const createSwParkingHarness = (): SwParkingHarness => {
+  const sourceListeners = new Map<string, (event: unknown) => void>();
+  const outbound: unknown[] = [];
+  const client = { postMessage: (message: unknown) => outbound.push(message) };
+
+  class FakeReadableStream {
+    public readonly controller = {
+      desiredSize: 1,
+      enqueue: (_chunk: Uint8Array) => undefined,
+      close: () => undefined,
+      error: (_reason: unknown) => undefined,
+    };
+    public constructor(
+      public readonly source: {
+        start?: (controller: FakeReadableStream["controller"]) => void;
+      },
+    ) {
+      source.start?.(this.controller);
+    }
+  }
+
+  class FakeResponse {
+    public readonly status: number;
+    public readonly headers: Record<string, string>;
+    public readonly body: FakeReadableStream | undefined;
+    public constructor(
+      body: FakeReadableStream | string,
+      init: { status?: number; headers?: Record<string, string> } = {},
+    ) {
+      this.status = init.status ?? 200;
+      this.headers = init.headers ?? {};
+      this.body = body instanceof FakeReadableStream ? body : undefined;
+    }
+  }
+
+  const self = {
+    addEventListener: (type: string, listener: (event: unknown) => void) => {
+      sourceListeners.set(type, listener);
+    },
+    skipWaiting: () => Promise.resolve(),
+    clients: {
+      claim: () => Promise.resolve(),
+      get: async () => client,
+    },
+  };
+  runInNewContext(
+    readFileSync(
+      fileURLToPath(new URL("../public/download.sw.js", import.meta.url)),
+      "utf8",
+    ),
+    {
+      self,
+      ReadableStream: FakeReadableStream,
+      Response: FakeResponse,
+      URL,
+      Map,
+      Promise,
+      Error,
+      Math,
+      Number,
+      String,
+      Uint8Array,
+      setTimeout,
+      clearTimeout,
+    },
+  );
+
+  return {
+    outbound,
+    fetch: (id) => {
+      let response:
+        | Promise<{
+            status: number;
+            headers: Record<string, string>;
+          }>
+        | undefined;
+      sourceListeners.get("fetch")?.({
+        clientId: "client-1",
+        request: {
+          method: "GET",
+          url: `https://example.test/__mayo-dl/${id}`,
+        },
+        respondWith: (value: Promise<FakeResponse>) => {
+          response = value as Promise<{
+            status: number;
+            headers: Record<string, string>;
+          }>;
+        },
+      });
+      if (response === undefined) {
+        throw new Error("The service-worker test did not park the request.");
+      }
+      return response;
+    },
+    sendMessage: (data) =>
+      sourceListeners.get("message")?.({ data, source: client }),
+  };
+};
+
 const countMessages = (messages: readonly unknown[], type: string): number =>
   messages.filter(
     (message) =>
@@ -841,6 +1282,28 @@ const countMessages = (messages: readonly unknown[], type: string): number =>
   ).length;
 
 describe("service-worker pull-driven FIFO", () => {
+  it("parks an iframe request until init arrives and then serves it", async () => {
+    const harness = createSwParkingHarness();
+    const response = harness.fetch("transfer-parked");
+
+    expect(countMessages(harness.outbound, "started")).toBe(0);
+    harness.sendMessage({
+      t: "init",
+      id: "transfer-parked",
+      name: "naive.txt",
+      totalBytes: 3,
+      creditBytes: 8 * 1024 * 1024,
+    });
+
+    const served = await response;
+    expect(served.status).toBe(200);
+    expect(served.headers["Content-Disposition"]).toBe(
+      'attachment; filename="naive.txt"',
+    );
+    expect(served.headers["Content-Length"]).toBe("3");
+    expect(countMessages(harness.outbound, "started")).toBe(1);
+  });
+
   it("returns credit only when a pending pull drains a chunk", async () => {
     const harness = createSwTestHarness(1);
 

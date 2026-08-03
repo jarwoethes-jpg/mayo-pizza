@@ -3,12 +3,16 @@ import type { TransferMessage } from "shared";
 import type { FolderEntry } from "../folder/entries";
 import { makeZipPlan, ZIP_DIRECTORY_LAST_MODIFIED } from "../folder/zipPlan";
 import {
+  blobMaxBytes,
+  createBlobSink,
   createSink,
+  isSwNoConsumerStallError,
   SINK_PROGRESS_WATCHDOG_MS,
   type Sink,
   type SinkFactory,
   SinkManager,
   type SinkStall,
+  warmUpSwDownload,
 } from "../sink";
 import type {
   ReceiverWorkerCommand,
@@ -357,6 +361,7 @@ export class TransferController {
     | undefined;
   private readonly receiverCommitPromises = new Set<Promise<void>>();
   private receiverSinkStalled = false;
+  private receiverBlobFallbackAttempted = false;
   private receiverCommitWatchdogTimer:
     | ReturnType<typeof globalThis.setTimeout>
     | undefined;
@@ -649,6 +654,7 @@ export class TransferController {
     this.receiverStarted = false;
     this.receiverFinishRequested = false;
     this.receiverDoneMessage = undefined;
+    void warmUpSwDownload().catch(() => undefined);
     const worker = this.createReceiverWorker();
     worker.postMessage({
       t: "init",
@@ -945,6 +951,10 @@ export class TransferController {
           if (this.destroyed || this.receiverWorker !== worker) {
             return;
           }
+          if (isSwNoConsumerStallError(error)) {
+            this.restartReceiverWithBlob();
+            return;
+          }
           const message = this.errorMessage(error, "The download sink failed.");
           try {
             worker.postMessage({ t: "sink-error", message });
@@ -1087,6 +1097,10 @@ export class TransferController {
     if (stall === undefined) {
       return;
     }
+    if (stall.reason === "sw-no-consumer") {
+      this.restartReceiverWithBlob();
+      return;
+    }
     if (stall.stalled) {
       this.clearReceiverCommitWatchdog();
       return;
@@ -1094,6 +1108,109 @@ export class TransferController {
     if (this.receiverDoneEvent !== undefined) {
       this.armReceiverCommitWatchdog();
     }
+  }
+
+  private restartReceiverWithBlob(): void {
+    if (
+      this.destroyed ||
+      this.role !== "downloader" ||
+      this.receiverBlobFallbackAttempted
+    ) {
+      return;
+    }
+    const transferId = this.transferId;
+    const manifest = this.receiverManifest;
+    if (transferId === undefined || manifest === undefined) {
+      return;
+    }
+    this.receiverBlobFallbackAttempted = true;
+    const maxBytes = blobMaxBytes();
+    if (manifest.totalBytes > maxBytes) {
+      this.fail(
+        `The browser refused to save the file through the service-worker download, and the in-memory fallback is limited to ${maxBytes / (1024 * 1024)} MB. Try Chrome or Edge, or a smaller file.`,
+      );
+      return;
+    }
+
+    // Restart from zero because the SW sink transfers its buffers and the page
+    // cannot replay bytes that were already handed to the old sink.
+    this.options.onResumeRequested?.();
+    this.clearReceiverCommitWatchdog();
+    this.receiverSinkManager?.cancel(
+      "Restarting the download with a browser fallback.",
+    );
+    this.receiverSinkManager = undefined;
+    this.receiverSinkStalled = false;
+    this.receiverCommitPromises.clear();
+    this.receiverInFlightCommits = 0;
+    this.receiverForwardedBytes = 0;
+    this.receiverSinkForwardedBytes = 0;
+    this.receiverCommittedBytes = 0;
+    this.receiverResumeCtrl = undefined;
+    this.receiverResumeData = undefined;
+    this.receiverStarted = false;
+    this.receiverFinishRequested = false;
+    this.receiverDoneMessage = undefined;
+    this.receiverDoneEvent = undefined;
+
+    const previousWorker = this.receiverWorker;
+    if (previousWorker !== undefined) {
+      previousWorker.onmessage = null;
+      previousWorker.onerror = null;
+      try {
+        previousWorker.postMessage({ t: "cancel" });
+      } catch {
+        // The worker may already have exited after the stalled sink failed.
+      }
+      previousWorker.terminate();
+      this.receiverWorker = undefined;
+    }
+
+    let sinkResult: Sink | Promise<Sink>;
+    try {
+      // Pass the blob factory explicitly so the load-time SW selection remains
+      // unchanged and an injected SW factory cannot intercept the recovery.
+      sinkResult = createSink(
+        manifest.suggestedName,
+        manifest.totalBytes,
+        createBlobSink,
+      );
+    } catch (error) {
+      this.fail(
+        this.errorMessage(error, "Could not prepare the browser fallback."),
+      );
+      return;
+    }
+
+    const worker = this.createReceiverWorker();
+    worker.postMessage({
+      t: "init",
+      transferId,
+      offset: 0,
+      totalBytes: manifest.totalBytes,
+    });
+    void Promise.resolve(sinkResult)
+      .then((sink) => {
+        if (this.destroyed || this.transferId !== transferId) {
+          void Promise.resolve(
+            sink.cancel("The transfer is no longer active."),
+          ).catch(() => undefined);
+          return;
+        }
+        this.receiverSinkManager = new SinkManager(sink, {
+          onStallChange: (stall) => this.handleSinkStall(stall),
+        });
+        this.sendCtrl({
+          t: "request",
+          transferId,
+          offset: 0,
+        });
+      })
+      .catch((error: unknown) => {
+        this.fail(
+          this.errorMessage(error, "Could not prepare the browser fallback."),
+        );
+      });
   }
 
   private requestNextSenderSlice(): void {
@@ -1341,6 +1458,7 @@ export class TransferController {
     this.receiverSinkManager?.cancel("Transfer cancelled.");
     this.receiverSinkManager = undefined;
     this.receiverSinkStalled = false;
+    this.receiverBlobFallbackAttempted = false;
     this.options.onSinkStall?.(undefined);
     this.receiverAcceptPending = false;
     this.senderPump?.cancel();

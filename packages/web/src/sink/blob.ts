@@ -3,7 +3,7 @@ import type { Sink } from "./index";
 /** Blob fallback is deliberately capped because it retains the whole download in memory. */
 export const BLOB_MAX_BYTES = 500 * 1024 * 1024;
 
-/** iOS kills a tab near 200-300 MB with no warning, well under the desktop ceiling. */
+/** iOS has an undocumented, RAM-dependent ceiling; this is an unverified estimate. */
 export const BLOB_MAX_BYTES_IOS = 150 * 1024 * 1024;
 
 interface BlobLimitEnvironment {

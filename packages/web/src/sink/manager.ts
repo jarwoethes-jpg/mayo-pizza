@@ -2,13 +2,33 @@ import type { Sink } from "./index";
 
 export const SINK_QUEUE_HIGH_WATERMARK = 8 * 1024 * 1024;
 export const SINK_STALL_NOTICE_MS = 30_000;
+export const SINK_SW_NO_CONSUMER_STALL_MS = 45_000;
+export const SINK_SW_NO_CONSUMER_MAX_COMMITTED_BYTES = 32 * 1024 * 1024;
 export const SINK_STALL_ABORT_MS = 600_000;
 export const SINK_START_TIMEOUT_MS = 60_000;
 
 export interface SinkStall {
   stalled: boolean;
   sinceMs: number;
+  reason?: "sw-no-consumer";
 }
+
+/** Identifies the service-worker stall that can be recovered by restarting on blob. */
+export class SwNoConsumerStallError extends Error {
+  public readonly recoverable = true;
+
+  public constructor() {
+    super(
+      "The service-worker download stalled because no download consumer attached.",
+    );
+    this.name = "SwNoConsumerStallError";
+  }
+}
+
+/** Checks whether a sink failure is the recoverable service-worker no-consumer stall. */
+export const isSwNoConsumerStallError = (
+  error: unknown,
+): error is SwNoConsumerStallError => error instanceof SwNoConsumerStallError;
 
 export interface SinkManagerOptions {
   highWatermark?: number;
@@ -54,6 +74,7 @@ export class SinkManager {
   private queuedBytes = 0;
   private active: PendingWrite | undefined;
   private hasCompletedWrite = false;
+  private committedBytes = 0;
   private processing = false;
   private closeRequested = false;
   private closePromise: Promise<void> | undefined;
@@ -162,6 +183,7 @@ export class SinkManager {
     try {
       await Promise.resolve(this.sink.write(next.bytes));
       if (!this.cancelled && this.failure === undefined) {
+        this.committedBytes += next.bytes.byteLength;
         this.hasCompletedWrite = true;
         next.resolve();
       }
@@ -218,6 +240,11 @@ export class SinkManager {
 
   private armWriteTimers(pending: PendingWrite): void {
     this.clearWriteTimers();
+    const useSwNoConsumerBudget =
+      this.sink.strategy === "sw" &&
+      this.hasCompletedWrite &&
+      this.committedBytes <= SINK_SW_NO_CONSUMER_MAX_COMMITTED_BYTES &&
+      this.sink.isResponsive?.() !== false;
     this.stallNoticeTimer = globalThis.setTimeout(() => {
       if (
         this.active !== pending ||
@@ -239,16 +266,38 @@ export class SinkManager {
         ) {
           return;
         }
+        // WHY: liveness pings that still get answers are positive evidence that
+        // the worker is alive while credits have stopped. That isolates the
+        // Chromium lost-user-activation failure to the missing download
+        // consumer. A dead worker must retain its own message and long budget.
+        const isSwNoConsumerStall =
+          this.sink.strategy === "sw" &&
+          this.hasCompletedWrite &&
+          this.committedBytes <= SINK_SW_NO_CONSUMER_MAX_COMMITTED_BYTES &&
+          this.sink.isResponsive?.() !== false;
+        if (isSwNoConsumerStall) {
+          this.onStallChange?.({
+            stalled: true,
+            sinceMs: this.stalledSinceMs ?? Date.now(),
+            reason: "sw-no-consumer",
+          });
+        }
         const message = this.hasCompletedWrite
-          ? this.sink.isResponsive?.() === false
-            ? "The download service worker stopped responding."
-            : "The download has been paused for too long. Your browser stopped accepting data."
+          ? isSwNoConsumerStall
+            ? new SwNoConsumerStallError()
+            : this.sink.isResponsive?.() === false
+              ? "The download service worker stopped responding."
+              : "The download has been paused for too long. Your browser stopped accepting data."
           : "The download never started — your browser did not begin saving the file. Check for a blocked or dismissed download prompt, then try again.";
-        const error = new Error(message);
+        const error = message instanceof Error ? message : new Error(message);
         pending.reject(error);
         this.fail(error);
       },
-      this.hasCompletedWrite ? SINK_STALL_ABORT_MS : SINK_START_TIMEOUT_MS,
+      useSwNoConsumerBudget
+        ? SINK_SW_NO_CONSUMER_STALL_MS
+        : this.hasCompletedWrite
+          ? SINK_STALL_ABORT_MS
+          : SINK_START_TIMEOUT_MS,
     );
   }
 

@@ -1,6 +1,6 @@
 import { createBlobSink } from "./blob";
 import { createFsaSink } from "./fsa";
-import { createSwSink } from "./swStream";
+import { createSwSink, warmUpSwServiceWorker } from "./swStream";
 
 export type SinkStrategy = "fsa" | "sw" | "blob" | "null";
 
@@ -140,6 +140,18 @@ export const getSinkStrategy = (): SinkStrategy => selectedStrategy;
 export const getSinkOverride = (): SinkOverride | undefined =>
   configuredOverride;
 
+/** Warms the native SW sink only when the production-selected strategy uses it. */
+export const warmUpSwDownload = (): Promise<void> => {
+  if (
+    selectedStrategy !== "sw" ||
+    configuredOverride !== undefined ||
+    readOverrideValue() !== undefined
+  ) {
+    return Promise.resolve();
+  }
+  return warmUpSwServiceWorker();
+};
+
 class NullSink implements Sink {
   public readonly strategy = "null" as const;
   public write(_bytes: Uint8Array): void {}
@@ -179,13 +191,17 @@ export {
   createBlobSink,
 } from "./blob";
 export {
+  isSwNoConsumerStallError,
   SINK_QUEUE_HIGH_WATERMARK,
   SINK_STALL_ABORT_MS,
   SINK_STALL_NOTICE_MS,
   SINK_START_TIMEOUT_MS,
+  SINK_SW_NO_CONSUMER_MAX_COMMITTED_BYTES,
+  SINK_SW_NO_CONSUMER_STALL_MS,
   SinkManager,
   type SinkManagerOptions,
   type SinkStall,
+  SwNoConsumerStallError,
 } from "./manager";
 export {
   consumeSwCredit,
@@ -193,6 +209,10 @@ export {
   isNextSwSequence,
   releaseSwCredit,
   SW_CREDIT_BYTES,
+  SW_PROTOCOL_VERSION,
+  SW_REQUEST_PARKING_PROTOCOL_VERSION,
   SwStreamSink,
+  supportsSwRequestParking,
+  warmUpSwServiceWorker,
 } from "./swStream";
 export { SINK_PROGRESS_WATCHDOG_MS } from "./watchdog";

@@ -2,13 +2,23 @@ const CACHE_NAME = "mayo-download-v1";
 void CACHE_NAME;
 const DOWNLOAD_PREFIX = "/__mayo-dl/";
 const MAX_CREDIT_BYTES = 8 * 1024 * 1024;
+const SW_PROTOCOL_VERSION = 2;
+const PARKED_REQUEST_TIMEOUT_MS = 30_000;
 const transfers = new Map();
+const parkedRequests = new Map();
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener("activate", (event) => {
+  for (const pending of parkedRequests.values()) {
+    settleParkedRequest(
+      pending,
+      new Response("Not found", { status: 404 }),
+      "The download service worker restarted before the request was initialized.",
+    );
+  }
   event.waitUntil(self.clients.claim());
 });
 
@@ -27,6 +37,107 @@ const fail = (transfer, message) => {
 
 const safeFilename = (name) =>
   name.replace(/[\\"]/g, "_").replace(/[\r\n]/g, "_");
+
+const reportClientError = (clientId, id, message) => {
+  if (clientId === undefined || self.clients?.get === undefined) {
+    return;
+  }
+  void self.clients
+    .get(clientId)
+    .then((client) => client?.postMessage({ t: "error", id, message }))
+    .catch(() => undefined);
+};
+
+const makeDownloadResponse = (transfer) => {
+  send(transfer, { t: "started", id: transfer.id });
+  const stream = new ReadableStream({
+    start(controller) {
+      transfer.controller = controller;
+      drain(transfer);
+    },
+    pull() {
+      if (transfer.closed) {
+        return Promise.resolve();
+      }
+      if (transfer.queue.length > 0 || transfer.closeRequested) {
+        drain(transfer);
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => {
+        transfer.pullResolve = () => {
+          resolve();
+          drain(transfer);
+        };
+      });
+    },
+    cancel(reason) {
+      fail(transfer, String(reason ?? "The download was cancelled."));
+      transfers.delete(transfer.id);
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "application/octet-stream",
+      "Content-Disposition": `attachment; filename="${safeFilename(transfer.name)}"`,
+      "Content-Length": String(transfer.totalBytes),
+    },
+  });
+};
+
+const settleParkedRequest = (pending, response, errorMessage) => {
+  if (parkedRequests.get(pending.id) !== pending) {
+    return;
+  }
+  parkedRequests.delete(pending.id);
+  clearTimeout(pending.timer);
+  pending.resolve(response);
+  if (errorMessage !== undefined) {
+    reportClientError(pending.clientId, pending.id, errorMessage);
+  }
+};
+
+const parkRequest = (id, clientId) => {
+  const existing = parkedRequests.get(id);
+  if (existing !== undefined) {
+    return existing.response;
+  }
+  let resolve;
+  const response = new Promise((settle) => {
+    resolve = settle;
+  });
+  const pending = {
+    id,
+    clientId,
+    response,
+    resolve,
+    timer: setTimeout(() => {
+      settleParkedRequest(
+        pending,
+        new Response("Not found", { status: 404 }),
+        "The download request did not match an active transfer.",
+      );
+    }, PARKED_REQUEST_TIMEOUT_MS),
+  };
+  parkedRequests.set(id, pending);
+  return response;
+};
+
+const createTransfer = (message, source) => ({
+  id: message.id,
+  name: String(message.name),
+  totalBytes: Number(message.totalBytes),
+  creditBytes: Math.min(MAX_CREDIT_BYTES, Number(message.creditBytes)),
+  receivedBytes: 0,
+  nextSequence: 0,
+  source,
+  controller: undefined,
+  pullResolve: undefined,
+  queue: [],
+  queuedBytes: 0,
+  closeRequested: false,
+  closed: false,
+  failed: false,
+});
 
 const closeIfDrained = (transfer) => {
   if (
@@ -70,29 +181,25 @@ const drain = (transfer) => {
 
 self.addEventListener("message", (event) => {
   const message = event.data;
+  if (message?.t === "hello") {
+    event.source?.postMessage({
+      t: "hello-ack",
+      protocol: SW_PROTOCOL_VERSION,
+    });
+    return;
+  }
   if (message?.t === "init") {
-    const transfer = {
-      id: message.id,
-      name: String(message.name),
-      totalBytes: Number(message.totalBytes),
-      creditBytes: Math.min(MAX_CREDIT_BYTES, Number(message.creditBytes)),
-      receivedBytes: 0,
-      nextSequence: 0,
-      source: event.source,
-      controller: undefined,
-      pullResolve: undefined,
-      queue: [],
-      queuedBytes: 0,
-      closeRequested: false,
-      closed: false,
-      failed: false,
-    };
+    const transfer = createTransfer(message, event.source);
     transfers.set(transfer.id, transfer);
     send(transfer, {
       t: "ready",
       id: transfer.id,
       creditBytes: transfer.creditBytes,
     });
+    const pending = parkedRequests.get(transfer.id);
+    if (pending !== undefined) {
+      settleParkedRequest(pending, makeDownloadResponse(transfer));
+    }
     return;
   }
   if (message?.t === "ping") {
@@ -106,6 +213,14 @@ self.addEventListener("message", (event) => {
 
   const transfer = transfers.get(message?.id);
   if (transfer === undefined) {
+    const pending = parkedRequests.get(message?.id);
+    if (pending !== undefined && message.t === "cancel") {
+      settleParkedRequest(
+        pending,
+        new Response("Not found", { status: 404 }),
+        String(message.reason),
+      );
+    }
     return;
   }
   transfer.source = event.source;
@@ -156,6 +271,7 @@ self.addEventListener("message", (event) => {
   if (message.t === "cancel") {
     fail(transfer, String(message.reason));
     transfers.delete(transfer.id);
+    return;
   }
 });
 
@@ -172,42 +288,8 @@ self.addEventListener("fetch", (event) => {
   const id = decodeURIComponent(url.pathname.slice(DOWNLOAD_PREFIX.length));
   const transfer = transfers.get(id);
   if (transfer === undefined) {
-    event.respondWith(new Response("Not found", { status: 404 }));
+    event.respondWith(parkRequest(id, event.clientId));
     return;
   }
-  send(transfer, { t: "started", id: transfer.id });
-  const stream = new ReadableStream({
-    start(controller) {
-      transfer.controller = controller;
-      drain(transfer);
-    },
-    pull() {
-      if (transfer.closed) {
-        return Promise.resolve();
-      }
-      if (transfer.queue.length > 0 || transfer.closeRequested) {
-        drain(transfer);
-        return Promise.resolve();
-      }
-      return new Promise((resolve) => {
-        transfer.pullResolve = () => {
-          resolve();
-          drain(transfer);
-        };
-      });
-    },
-    cancel(reason) {
-      fail(transfer, String(reason ?? "The download was cancelled."));
-      transfers.delete(transfer.id);
-    },
-  });
-  event.respondWith(
-    new Response(stream, {
-      headers: {
-        "Content-Type": "application/octet-stream",
-        "Content-Disposition": `attachment; filename="${safeFilename(transfer.name)}"`,
-        "Content-Length": String(transfer.totalBytes),
-      },
-    }),
-  );
+  event.respondWith(makeDownloadResponse(transfer));
 });

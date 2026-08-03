@@ -141,6 +141,38 @@ const addSlowSinkInitScript = async (
   });
 };
 
+const addStalledSwSinkInitScript = async (
+  context: BrowserContext,
+): Promise<void> => {
+  await context.addInitScript(() => {
+    const stallAfterBytes = 4 * 1024 * 1024;
+    let committedBytes = 0;
+    const fallbackState = { fallbackCount: 0 };
+    window.__MAYO_SINK__ = {
+      strategy: "sw",
+      autoAccept: false,
+      fallbackState,
+      factory: () => ({
+        strategy: "sw",
+        write: (bytes: Uint8Array) => {
+          if (committedBytes >= stallAfterBytes) {
+            return new Promise<void>(() => {});
+          }
+          committedBytes += bytes.byteLength;
+          return Promise.resolve();
+        },
+        close: () => undefined,
+        cancel: () => {
+          // Fallback teardown cancels the stalled SW sink; count restarts so
+          // the test can catch duplicate fallback attempts.
+          fallbackState.fallbackCount += 1;
+        },
+        isResponsive: () => true,
+      }),
+    };
+  });
+};
+
 const openPair = async (
   browser: Browser,
   receiverSetup?: (context: BrowserContext) => Promise<void>,
@@ -288,6 +320,51 @@ test.describe("streaming download sinks", () => {
         ),
         failure.promise,
       ]);
+    } finally {
+      failure.stop();
+      await contextA.close();
+      await contextB.close();
+    }
+  });
+
+  test("retries a stalled service-worker consumer with one verified blob fallback", async ({
+    browser,
+  }) => {
+    test.skip(
+      blobFile === undefined || blobHash === undefined,
+      "MAYO_TEST_FILE_100M and MAYO_TEST_FILE_100M_SHA256 are required.",
+    );
+    if (blobFile === undefined || blobHash === undefined) {
+      return;
+    }
+    const { contextA, contextB, sender, receiver } = await openPair(
+      browser,
+      addStalledSwSinkInitScript,
+    );
+    const failure = startTransferFailureMonitor(receiver);
+    try {
+      const downloadPromise = receiver.waitForEvent("download");
+      await transferToReceiver(sender, receiver, blobFile);
+      const download = await Promise.race([downloadPromise, failure.promise]);
+      const downloadPath = await download.path();
+      if (downloadPath === null) {
+        throw new Error("The blob fallback download has no temporary path.");
+      }
+      expect(await sha256File(downloadPath)).toBe(blobHash);
+      await Promise.race([
+        expect(receiver.getByTestId("transfer-result")).toContainText(
+          `verified=true sha256=${blobHash}`,
+          { timeout: 1_080_000 },
+        ),
+        failure.promise,
+      ]);
+      const fallbackCount = await receiver.evaluate(() => {
+        const override = window.__MAYO_SINK__ as {
+          fallbackState?: { fallbackCount?: number };
+        };
+        return override.fallbackState?.fallbackCount ?? 0;
+      });
+      expect(fallbackCount).toBeLessThanOrEqual(1);
     } finally {
       failure.stop();
       await contextA.close();
