@@ -237,3 +237,105 @@ describe("peer rebuild coalescing", () => {
     peer.close();
   });
 });
+
+describe("peer-left teardown", () => {
+  it("closes the current connection without entering recovery", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
+
+    const listeners = new Map<string, Set<(payload: never) => void>>();
+    const signaling = {
+      isOpen: true,
+      on(event: string, listener: (payload: never) => void) {
+        const eventListeners = listeners.get(event) ?? new Set();
+        eventListeners.add(listener);
+        listeners.set(event, eventListeners);
+        return () => eventListeners.delete(listener);
+      },
+      requestIceConfig: async () => [],
+      sendSignal: async () => undefined,
+    } as unknown as SignalingClient;
+    const emit = (event: string, payload: never): void => {
+      for (const listener of listeners.get(event) ?? []) {
+        listener(payload);
+      }
+    };
+    const peer = createPeer("uploader", signaling);
+    const exhausted = vi.fn();
+    peer.on("exhausted", exhausted);
+    await peer.ready;
+    emit("peer-joined", { t: "peer-joined", peerId: "remote" } as never);
+    await flushPromises();
+
+    const currentPeer = FakePeerConnection.instances[0];
+    if (currentPeer === undefined) {
+      throw new Error("The fake peer was not constructed.");
+    }
+    currentPeer.connectionState = "connected";
+    currentPeer.onconnectionstatechange?.();
+
+    emit("peer-left", { t: "peer-left", peerId: "remote" } as never);
+
+    expect(currentPeer.connectionState).toBe("closed");
+    expect(peer.connectionState.value).toBe("connecting");
+    expect(peer.iceConnectionState.value).toBe("new");
+    currentPeer.connectionState = "failed";
+    currentPeer.onconnectionstatechange?.();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await flushPromises();
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(exhausted).not.toHaveBeenCalled();
+    peer.close();
+  });
+
+  it("builds a fresh connection and signals a rejoined peer", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
+
+    const listeners = new Map<string, Set<(payload: never) => void>>();
+    const rebuildSignalTargets: string[] = [];
+    const signaling = {
+      isOpen: true,
+      on(event: string, listener: (payload: never) => void) {
+        const eventListeners = listeners.get(event) ?? new Set();
+        eventListeners.add(listener);
+        listeners.set(event, eventListeners);
+        return () => eventListeners.delete(listener);
+      },
+      requestIceConfig: async () => [],
+      sendSignal: async (to: string, payload: unknown) => {
+        if (
+          typeof payload === "object" &&
+          payload !== null &&
+          (payload as { mayo?: unknown }).mayo === "rebuild"
+        ) {
+          rebuildSignalTargets.push(to);
+        }
+      },
+    } as unknown as SignalingClient;
+    const emit = (event: string, payload: never): void => {
+      for (const listener of listeners.get(event) ?? []) {
+        listener(payload);
+      }
+    };
+    const peer = createPeer("uploader", signaling);
+    await peer.ready;
+    emit("peer-joined", { t: "peer-joined", peerId: "remote" } as never);
+    await flushPromises();
+
+    const currentPeer = FakePeerConnection.instances[0];
+    if (currentPeer === undefined) {
+      throw new Error("The fake peer was not constructed.");
+    }
+    currentPeer.connectionState = "connected";
+    currentPeer.onconnectionstatechange?.();
+    emit("peer-left", { t: "peer-left", peerId: "remote" } as never);
+    emit("peer-joined", { t: "peer-joined", peerId: "remote-2" } as never);
+    await flushPromises();
+
+    expect(FakePeerConnection.instances).toHaveLength(2);
+    expect(FakePeerConnection.instances[1]).not.toBe(currentPeer);
+    expect(rebuildSignalTargets).toContain("remote-2");
+    peer.close();
+  });
+});

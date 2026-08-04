@@ -265,6 +265,21 @@ class PeerConnectionImpl implements PeerConnection {
       }),
       signaling.on("peer-left", (message) => {
         if (message.peerId === this.remotePeerId) {
+          this.clearRecoveryTimers();
+          this.recoveryAttempt = 0;
+          this.recoveryInFlight = false;
+          this.ctrlProtocol?.dispose();
+          this.peerConnection?.close();
+          this.peerConnection = undefined;
+          this.ctrlProtocol = undefined;
+          this.ctrlChannel = undefined;
+          this.dataChannel = undefined;
+          this.remoteDescriptionSet = false;
+          this.remoteCandidates = new RemoteIceCandidateQueue();
+          this.localCandidates = [];
+          this.offerStarted = false;
+          this.connectionStateValue.value = "connecting";
+          this.iceConnectionStateValue.value = "new";
           this.remotePeerId = undefined;
           this.rebuildPending = true;
           this.emit("peer-gone", { peerId: message.peerId });
