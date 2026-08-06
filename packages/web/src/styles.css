@@ -655,6 +655,18 @@ input[type="checkbox"] {
   color: var(--mp-text-dim);
 }
 
+.kofi-button {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.kofi-button img {
+  display: block;
+  height: 36px;
+  width: auto;
+}
+
 .legal-footer {
   display: flex;
   flex-wrap: wrap;

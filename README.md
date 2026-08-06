@@ -226,6 +226,32 @@ mayo.pizza is free and ad-free. If it saved you a transfer, you can buy me a cof
 
 [![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/mayonesss)
 
+## FAQ
+
+### Is it free?
+
+mayo.pizza is free and ad-free. Donations are voluntary, and they do not purchase availability, priority, or any service guarantee.
+
+### Can mayo.pizza see my files?
+
+On the peer-to-peer path, file bytes never touch our signaling server. Our signaling server sees room slugs, peer IDs, and IP addresses, but never filenames or file contents. If a connection falls back to TURN, encrypted bytes transit our coturn server; they are DTLS-encrypted and unreadable to us.
+
+### What is the relay (TURN) path?
+
+The relay (TURN) path is the fallback route where encrypted bytes transit our coturn server. They are DTLS-encrypted and unreadable to us.
+
+### How long does a room last?
+
+Rooms hold only a slug, timestamps, and hashes — never file data. They survive a server restart and expire after 24 idle hours.
+
+### How do I report abuse?
+
+Please use mayo.pizza for lawful sharing only. To report abuse, contact **abuse@mayo.pizza** with the room details and a clear description of the issue.
+
+### How can I support the project?
+
+You can buy me a coffee on Ko-fi: https://ko-fi.com/E1E024BMVJ. Donations are voluntary, and they do not purchase availability, priority, or any service guarantee.
+
 ## License
 
 Copyright (C) 2026 mayo.pizza contributors

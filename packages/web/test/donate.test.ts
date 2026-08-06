@@ -8,12 +8,16 @@ vi.mock("react-dom/client", () => ({
   createRoot: () => ({ render: () => undefined }),
 }));
 
-const getDonateAttributes = (markup: string): string => {
-  const match = markup.match(/<a\b([^>]+)>Support<\/a>/);
+const getDonateAttributes = (
+  markup: string,
+): { attributes: string; contents: string } => {
+  const match = markup.match(
+    /<a\b(?=[^>]*\bclass="kofi-button"[^>]*)([^>]*)>([\s\S]*?)<\/a>/,
+  );
   if (match === null) {
-    throw new Error("The rendered footer has no Support anchor.");
+    throw new Error("The rendered footer has no Ko-fi button anchor.");
   }
-  return match[1];
+  return { attributes: match[1], contents: match[2] };
 };
 
 describe("donate footer links", () => {
@@ -33,7 +37,7 @@ describe("donate footer links", () => {
     ];
 
     for (const markup of markups) {
-      const attributes = getDonateAttributes(markup);
+      const { attributes, contents } = getDonateAttributes(markup);
       const href = attributes.match(/\bhref="([^"]*)"/)?.[1];
       const target = attributes.match(/\btarget="([^"]*)"/)?.[1];
       const rel = attributes.match(/\brel="([^"]*)"/)?.[1] ?? "";
@@ -42,6 +46,9 @@ describe("donate footer links", () => {
       expect(target).toBe("_blank");
       expect(rel).toContain("noopener");
       expect(rel).toContain("noreferrer");
+      expect(contents).toMatch(
+        /<img\b[^>]*\balt="Buy Me a Coffee at ko-fi\.com"[^>]*\/?\s*>/,
+      );
     }
   });
 });

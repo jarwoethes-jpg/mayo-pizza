@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 
 /** Mayo’s Ko-fi donation page. */
-export const DONATE_URL = "https://ko-fi.com/mayonesss";
+export const DONATE_URL = "https://ko-fi.com/E1E024BMVJ";
 
 interface LegalPageProps {
   title: string;
@@ -29,9 +29,25 @@ export const LegalPage = ({ title, children }: LegalPageProps) => (
       </div>
       <footer className="legal-footer">
         <a href="/privacy">Privacy</a>
-        <a href="/terms">Terms &amp; abuse</a>
-        <a href={DONATE_URL} target="_blank" rel="noopener noreferrer">
-          Support
+        <a href="/terms">Terms &amp; Abuse</a>
+        <a
+          href="https://github.com/jarwoethes-jpg/mayo-pizza#faq"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          FAQ
+        </a>
+        <a
+          href={DONATE_URL}
+          className="kofi-button"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <img
+            src="/brand/kofi-button.png"
+            height="36"
+            alt="Buy Me a Coffee at ko-fi.com"
+          />
         </a>
       </footer>
     </article>

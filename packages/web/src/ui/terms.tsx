@@ -13,7 +13,7 @@ export const TERMS_COPY = [
 
 /** Renders the short service terms and abuse-reporting route. */
 export const TermsPage = () => (
-  <LegalPage title="Terms & abuse">
+  <LegalPage title="Terms & Abuse">
     {TERMS_COPY.map((paragraph) => (
       <p key={paragraph}>{paragraph}</p>
     ))}

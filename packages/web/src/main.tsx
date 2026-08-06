@@ -1503,9 +1503,25 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
               "On a direct path, your files travel peer to peer. If we use TURN, encrypted bytes pass through our relay; we still can’t read them."}
             <span className="legal-links">
               <a href="/privacy">Privacy</a>
-              <a href="/terms">Terms &amp; abuse</a>
-              <a href={DONATE_URL} target="_blank" rel="noopener noreferrer">
-                Support
+              <a href="/terms">Terms &amp; Abuse</a>
+              <a
+                href="https://github.com/jarwoethes-jpg/mayo-pizza#faq"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                FAQ
+              </a>
+              <a
+                href={DONATE_URL}
+                className="kofi-button"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                <img
+                  src="/brand/kofi-button.png"
+                  height="36"
+                  alt="Buy Me a Coffee at ko-fi.com"
+                />
               </a>
             </span>
           </footer>
