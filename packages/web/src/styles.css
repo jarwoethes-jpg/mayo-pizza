@@ -633,6 +633,7 @@ input[type="checkbox"] {
   display: flex;
   justify-content: center;
   gap: 0.8rem;
+  align-items: center;
   margin-top: 0.6rem;
 }
 
@@ -663,7 +664,7 @@ input[type="checkbox"] {
 
 .kofi-button img {
   display: block;
-  height: 36px;
+  height: 28px;
   width: auto;
 }
 
@@ -672,6 +673,7 @@ input[type="checkbox"] {
   flex-wrap: wrap;
   justify-content: center;
   gap: 1rem;
+  align-items: center;
   margin-top: 2rem;
   border-top: 1px solid var(--mp-border);
   padding-top: 1rem;
