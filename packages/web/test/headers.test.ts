@@ -53,7 +53,16 @@ test("the production policy carries no localhost signalling origin", async () =>
 
   expect(policy).not.toContain("127.0.0.1");
   expect(policy).not.toContain("localhost");
-  expect(policy).toContain("connect-src 'self' wss://mayo.pizza");
+  const scriptSrc = policy
+    ?.split(";")
+    .find((directive) => directive.trim().startsWith("script-src"));
+  const connectSrc = policy
+    ?.split(";")
+    .find((directive) => directive.trim().startsWith("connect-src"));
+  expect(scriptSrc).toContain("https://stats.mayo.pizza");
+  expect(connectSrc?.trim()).toBe(
+    "connect-src 'self' https://stats.mayo.pizza wss://mayo.pizza",
+  );
 });
 
 test("the preview policy grants exactly the signalling origins the e2e suite uses", async () => {
@@ -70,20 +79,27 @@ test("the preview policy grants exactly the signalling origins the e2e suite use
   );
   // Production-only origins must not leak the other way either.
   expect(policy).not.toContain("wss://mayo.pizza");
+  expect(policy).not.toContain("https://stats.mayo.pizza");
 });
 
-test("both environments share every directive other than connect-src", async () => {
+test("both environments share every core directive", async () => {
   const { buildHeaders } = await import("../../../infra/header-source.mjs");
-  const stripConnectSrc = (policy: string): string[] =>
+  const stripEnvironmentSrc = (policy: string): string[] =>
     policy
       .split(";")
       .map((directive) => directive.trim())
-      .filter((directive) => !directive.startsWith("connect-src"));
+      .filter(
+        (directive) =>
+          !directive.startsWith("script-src") &&
+          !directive.startsWith("connect-src"),
+      );
 
   const production = buildHeaders("production")[
     "Content-Security-Policy"
   ] as string;
   const preview = buildHeaders("preview")["Content-Security-Policy"] as string;
 
-  expect(stripConnectSrc(preview)).toEqual(stripConnectSrc(production));
+  expect(stripEnvironmentSrc(preview)).toEqual(
+    stripEnvironmentSrc(production),
+  );
 });

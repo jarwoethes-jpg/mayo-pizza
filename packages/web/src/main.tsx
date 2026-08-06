@@ -46,6 +46,18 @@ import { initialTransferUiState, transferUiReducer } from "./ui/state";
 import { TermsPage } from "./ui/terms";
 import "./styles.css";
 
+declare global {
+  interface Window {
+    umami?: {
+      track: (
+        callback: (
+          props: Record<string, unknown>,
+        ) => Record<string, unknown>,
+      ) => void;
+    };
+  }
+}
+
 interface RoomViewProps {
   role: PeerRole;
   slug?: string;
@@ -1590,3 +1602,11 @@ if (!rootElement) {
 }
 
 createRoot(rootElement).render(<App />);
+
+if (typeof window !== "undefined") {
+  // WHY: room slugs are URL paths, so analytics must stay blind to rooms.
+  window.umami?.track((props) => ({
+    ...props,
+    url: window.location.origin + "/",
+  }));
+}

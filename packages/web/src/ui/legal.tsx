@@ -61,6 +61,7 @@ export const PRIVACY_COPY = [
   "If a connection falls back to TURN, encrypted bytes do transit our coturn server. They are DTLS-encrypted and unreadable to us, but they are traffic through our box, and we say so plainly.",
   "We retain signaling access logs for 7 days. Those logs contain no filenames and no slugs.",
   "Rooms hold only a slug, timestamps, and hashes — never file data. They survive a server restart and expire after 24 idle hours.",
+  "We run self-hosted, cookieless analytics (Umami) that counts page visits. No cookies, no fingerprinting, no record of which rooms you visit, and the data never leaves our server.",
 ] as const;
 
 /** Renders the plain-language privacy stance. */

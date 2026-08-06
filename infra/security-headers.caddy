@@ -7,5 +7,5 @@ header {
 	X-Robots-Tag "noindex, nofollow"
 	Cross-Origin-Opener-Policy "same-origin"
 	-Server
-	Content-Security-Policy "default-src 'self'; script-src 'self'; worker-src 'self'; connect-src 'self' wss://mayo.pizza; img-src 'self' data: blob:; font-src 'self'; style-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+	Content-Security-Policy "default-src 'self'; script-src 'self' https://stats.mayo.pizza; worker-src 'self'; connect-src 'self' https://stats.mayo.pizza wss://mayo.pizza; img-src 'self' data: blob:; font-src 'self'; style-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
 }

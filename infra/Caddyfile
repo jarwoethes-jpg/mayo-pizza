@@ -67,6 +67,28 @@ mayo.pizza {
 	}
 }
 
+stats.mayo.pizza {
+	encode zstd gzip
+	log {
+		output file /var/log/caddy/access.log {
+			roll_at 00:00
+			roll_size 100MiB
+			roll_keep 0
+			roll_keep_for 168h
+		}
+		format filter {
+			wrap json
+			fields {
+				request>uri delete
+				request>remote_ip ip_mask 16 32
+				request>client_ip ip_mask 16 32
+				request>headers>X-Forwarded-For ip_mask 16 32
+			}
+		}
+	}
+	reverse_proxy umami:3000
+}
+
 turn.mayo.pizza {
 	respond 404
 }

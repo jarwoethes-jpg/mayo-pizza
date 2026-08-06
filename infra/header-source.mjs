@@ -19,6 +19,19 @@ export const readHeaderSource = (headersPath = defaultHeadersPath) =>
   /** @type {HeaderSource} */ (JSON.parse(readFileSync(headersPath, "utf8")));
 
 /**
+ * Extra `script-src` origins each environment needs on top of the core policy.
+ *
+ * WHY: the production page loads self-hosted analytics, but preview and e2e runs must not
+ * record pageviews in the production dashboard.
+ *
+ * @type {Record<"production" | "preview", readonly string[]>}
+ */
+export const SCRIPT_SRC_EXTRAS = {
+  production: ["https://stats.mayo.pizza"],
+  preview: [],
+};
+
+/**
  * Extra `connect-src` origins each environment needs on top of the core policy.
  *
  * WHY: the signalling socket is a different origin from the page in preview (the app is
@@ -30,28 +43,32 @@ export const readHeaderSource = (headersPath = defaultHeadersPath) =>
  * @type {Record<"production" | "preview", readonly string[]>}
  */
 export const CONNECT_SRC_EXTRAS = {
-  production: ["wss://mayo.pizza"],
+  production: ["https://stats.mayo.pizza", "wss://mayo.pizza"],
   preview: ["ws://127.0.0.1:3100", "ws://127.0.0.1:3101"],
 };
 
 /**
- * Appends origins to the `connect-src` directive of a policy string.
+ * Appends origins to a CSP directive of a policy string.
  *
  * @param {string} policy
+ * @param {string} directiveName
  * @param {readonly string[]} origins
  * @returns {string}
  */
-const appendConnectSrc = (policy, origins) => {
+const appendCspSources = (policy, directiveName, origins) => {
   if (origins.length === 0) {
     return policy;
   }
-  const directive = /connect-src ([^;]*)/;
+  const directive = new RegExp(`${directiveName} ([^;]*)`);
   if (!directive.test(policy)) {
-    throw new Error("The core CSP has no connect-src directive to extend.");
+    throw new Error(
+      `The core CSP has no ${directiveName} directive to extend.`,
+    );
   }
   return policy.replace(
     directive,
-    (_match, sources) => `connect-src ${sources.trim()} ${origins.join(" ")}`,
+    (_match, sources) =>
+      `${directiveName} ${sources.trim()} ${origins.join(" ")}`,
   );
 };
 
@@ -63,17 +80,27 @@ const appendConnectSrc = (policy, origins) => {
  * @returns {HeaderSource}
  */
 export const buildHeaders = (environment, headers = readHeaderSource()) => {
-  const extras = CONNECT_SRC_EXTRAS[environment];
-  if (extras === undefined) {
+  const scriptExtras = SCRIPT_SRC_EXTRAS[environment];
+  const connectExtras = CONNECT_SRC_EXTRAS[environment];
+  if (scriptExtras === undefined || connectExtras === undefined) {
     throw new Error(`Unknown header environment: ${environment}`);
   }
   const policy = headers["Content-Security-Policy"];
   if (typeof policy !== "string") {
     throw new Error("The canonical header source has no CSP string.");
   }
+  const policyWithScriptExtras = appendCspSources(
+    policy,
+    "script-src",
+    scriptExtras,
+  );
   return {
     ...headers,
-    "Content-Security-Policy": appendConnectSrc(policy, extras),
+    "Content-Security-Policy": appendCspSources(
+      policyWithScriptExtras,
+      "connect-src",
+      connectExtras,
+    ),
   };
 };
 

@@ -72,6 +72,54 @@ services:
       retries: 3
     restart: unless-stopped
 
+  umami:
+    image: docker.umami.is/umami-software/umami:postgresql-latest
+    expose:
+      - "3000"
+    environment:
+      DATABASE_URL: postgresql://umami:${UMAMI_DB_PASSWORD:?UMAMI_DB_PASSWORD must be set}@postgres:5432/umami
+      HASH_SALT: ${UMAMI_HASH_SALT:?UMAMI_HASH_SALT must be set}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/heartbeat"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: journald
+      options:
+        tag: "mayo-umami"
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      default:
+        ipv4_address: 172.30.0.4
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: umami
+      POSTGRES_USER: umami
+      POSTGRES_PASSWORD: ${UMAMI_DB_PASSWORD:?UMAMI_DB_PASSWORD must be set}
+    volumes:
+      - umami_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U umami"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: journald
+      options:
+        tag: "mayo-postgres"
+    restart: unless-stopped
+    networks:
+      default:
+        ipv4_address: 172.30.0.5
+
   coturn:
     image: coturn/coturn:4.6.2
     network_mode: host
@@ -97,6 +145,7 @@ volumes:
   caddy_config:
   caddy_logs:
   room_state:
+  umami_db:
 
 networks:
   default:

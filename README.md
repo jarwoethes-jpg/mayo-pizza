@@ -236,6 +236,8 @@ mayo.pizza is free and ad-free. Donations are voluntary, and they do not purchas
 
 On the peer-to-peer path, file bytes never touch our signaling server. Our signaling server sees room slugs, peer IDs, and IP addresses, but never filenames or file contents. If a connection falls back to TURN, encrypted bytes transit our coturn server; they are DTLS-encrypted and unreadable to us.
 
+We run self-hosted, cookieless analytics (Umami) that counts page visits. No cookies, no fingerprinting, no record of which rooms you visit, and the data never leaves our server.
+
 ### What is the relay (TURN) path?
 
 The relay (TURN) path is the fallback route where encrypted bytes transit our coturn server. They are DTLS-encrypted and unreadable to us.
