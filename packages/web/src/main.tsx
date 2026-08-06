@@ -87,8 +87,8 @@ const getSessionCopy = (
   }
   if (status === "connecting") {
     return role === "uploader"
-      ? "We’re warming up the oven and getting your private room ready."
-      : "We’re finding the room and getting your private connection ready.";
+      ? "We’re warming up the oven and getting your private room ready. Your files travel straight to your receiver."
+      : "We’re finding the room and getting your private connection ready. The sender’s files come straight to you.";
   }
   if (status === "reconnecting") {
     return "Slice dropped! Our connection got a little messy. We’re getting a fresh one ready, but in the meantime, check your Wi-Fi!";
@@ -1017,6 +1017,9 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
               alt="mayo.pizza pizza portrait"
             />
             <h1 className="wordmark">mayo.pizza</h1>
+            <p className="product-line">
+              Peer-to-peer file transfer, straight from your browser.
+            </p>
             <p className="tagline">Secure. Fast. Shared.</p>
           </header>
 

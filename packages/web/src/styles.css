@@ -140,6 +140,16 @@ input[type="checkbox"] {
   line-height: 0.95;
 }
 
+.product-line {
+  margin: 0;
+  max-width: 34ch;
+  color: var(--mp-text);
+  font-size: clamp(1.0625rem, 2.6vw, 1.25rem);
+  font-weight: 400;
+  line-height: 1.4;
+  text-wrap: balance;
+}
+
 .view-heading {
   margin: 0;
   color: var(--mp-text);
