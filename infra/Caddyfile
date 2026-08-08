@@ -62,6 +62,14 @@ mayo.pizza {
 		respond 404
 	}
 
+	handle /_discogs/healthz {
+		respond 404
+	}
+
+	handle_path /_discogs/* {
+		reverse_proxy discogs-proxy:8080
+	}
+
 	handle {
 		reverse_proxy app:3000
 	}
