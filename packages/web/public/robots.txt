@@ -1,2 +1,9 @@
 User-agent: *
+Allow: /$
+Allow: /privacy$
+Allow: /terms$
+Allow: /brand/
+Allow: /assets/
+Allow: /fonts/
+Allow: /robots.txt$
 Disallow: /

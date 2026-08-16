@@ -58,6 +58,13 @@ mayo.pizza {
 	}
 	import security-headers.caddy
 
+	# WHY: only the marketing surface is indexable. The room slug IS the URL path,
+	# so every unknown path must keep the default noindex from security-headers.caddy.
+	# path_regexp is anchored (^...$) so this is an exact-path match, never a prefix
+	# match that would index /<slug>.
+	@indexable path_regexp ^/(privacy|terms)?/?$
+	header @indexable -X-Robots-Tag
+
 	handle /metrics {
 		respond 404
 	}
