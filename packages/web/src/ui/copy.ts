@@ -19,7 +19,13 @@ export const getFailureCopy = (reason: string, role: PeerRole): FailureCopy => {
     normalized.includes("sink") ||
     normalized.includes("save") ||
     normalized.includes("file system access") ||
-    normalized.includes("service-worker downloads")
+    normalized.includes("service-worker downloads") ||
+    normalized.includes("createwritable") ||
+    normalized.includes("filesystemfilehandle") ||
+    normalized.includes("notallowederror") ||
+    normalized.includes("showsavefilepicker") ||
+    normalized.includes("not allowed by the user agent") ||
+    normalized.includes("download sink")
   ) {
     return {
       heading: "The save spot got messy.",

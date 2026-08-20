@@ -55,6 +55,7 @@ export type TransferManifestInfo = Extract<TransferMessage, { t: "manifest" }>;
 
 export interface TransferControllerOptions {
   onManifest?: (manifestInfo: TransferManifestInfo) => void;
+  onAcceptFailed?: (message: string) => void;
   onProgress?: (progress: TransferProgress) => void;
   onSinkStall?: (stall: SinkStall | undefined) => void;
   onResult?: (result: TransferResult) => void;
@@ -560,7 +561,8 @@ export class TransferController {
         this.options.sinkFactory,
       );
     } catch (error) {
-      this.fail(
+      this.receiverAcceptPending = false;
+      this.options.onAcceptFailed?.(
         this.errorMessage(error, "Could not prepare the download sink."),
       );
       return;
@@ -585,7 +587,7 @@ export class TransferController {
       })
       .catch((error: unknown) => {
         this.receiverAcceptPending = false;
-        this.fail(
+        this.options.onAcceptFailed?.(
           this.errorMessage(error, "Could not prepare the download sink."),
         );
       });

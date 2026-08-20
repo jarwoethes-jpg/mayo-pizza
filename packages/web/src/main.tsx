@@ -207,6 +207,11 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
   const transferRef = useRef<
     ReturnType<typeof createTransferController> | undefined
   >(undefined);
+  // Held separately from state so a failed sink can re-offer the same manifest.
+  const pendingManifestRef = useRef<TransferManifestInfo | undefined>(
+    undefined,
+  );
+  const acceptFailedRef = useRef(false);
   const autoPingSent = useRef(false);
   const connectionStateRef = useRef<RTCPeerConnectionState>("new");
   const resumePendingRef = useRef(false);
@@ -263,6 +268,8 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
         }
       },
       onManifest: (manifest) => {
+        pendingManifestRef.current = manifest;
+        acceptFailedRef.current = false;
         setPendingManifest(manifest);
         setSessionNotice(undefined);
         setAnnouncement(
@@ -274,6 +281,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
         }
       },
       onResult: (result) => {
+        pendingManifestRef.current = undefined;
         setPendingManifest(undefined);
         setTransferResult(result);
         dispatchTransferUi({ type: "result", result });
@@ -306,6 +314,17 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
         dispatchTransferUi({ type: "error", message: error.message });
         setAnnouncement(getFailureCopy(error.message, role).message);
         setLog(error.message);
+      },
+      onAcceptFailed: (message) => {
+        // A sink that never opened is local and recoverable, so the session
+        // survives and the receiver is re-offered the same manifest.
+        acceptFailedRef.current = true;
+        const manifest = pendingManifestRef.current;
+        if (manifest !== undefined) {
+          setPendingManifest(manifest);
+        }
+        setAnnouncement(getFailureCopy(message, role).message);
+        setLog(message);
       },
       onCancelled: (reason) => {
         dispatchTransferUi({ type: "cancel" });
@@ -670,13 +689,18 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
   };
 
   const acceptTransfer = (): void => {
+    acceptFailedRef.current = false;
     // This must stay the first call in the click handler: FSA needs the original gesture.
     transferRef.current?.acceptTransfer();
-    setPendingManifest(undefined);
+    // Keep the prompt up on failure so the retry carries a fresh gesture.
+    if (!acceptFailedRef.current) {
+      setPendingManifest(undefined);
+    }
   };
 
   const rejectTransfer = (): void => {
     transferRef.current?.rejectTransfer();
+    pendingManifestRef.current = undefined;
     setPendingManifest(undefined);
   };
 

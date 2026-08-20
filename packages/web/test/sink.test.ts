@@ -32,6 +32,7 @@ import {
   SW_PROTOCOL_VERSION,
   warmUpSwServiceWorker,
 } from "../src/sink/swStream";
+import { createFsaSink } from "../src/sink/fsa";
 import type { ReceiverWorkerEvent } from "../src/worker/messages";
 import { ReceiverProcessor } from "../src/worker/receiverLogic";
 
@@ -133,6 +134,82 @@ describe("sink strategy detection", () => {
     expect(() => createBlobSink("too-large.bin", BLOB_MAX_BYTES + 1)).toThrow(
       /too large/i,
     );
+  });
+});
+
+describe("File System Access sink permissions", () => {
+  const writable = () => ({
+    write: vi.fn().mockResolvedValue(undefined),
+    close: vi.fn().mockResolvedValue(undefined),
+  });
+
+  it("rejects a denied save permission with a sink-identifying message", async () => {
+    const queryPermission = vi.fn().mockResolvedValue("denied");
+    const requestPermission = vi.fn().mockResolvedValue("denied");
+    const createWritable = vi.fn().mockResolvedValue(writable());
+    vi.stubGlobal("window", {
+      showSaveFilePicker: vi.fn().mockResolvedValue({
+        queryPermission,
+        requestPermission,
+        createWritable,
+      }),
+    });
+
+    await expect(createFsaSink("file.bin")).rejects.toThrow(
+      /sink.*save|save.*sink/i,
+    );
+    expect(queryPermission).toHaveBeenCalledWith({ mode: "readwrite" });
+    expect(requestPermission).toHaveBeenCalledWith({ mode: "readwrite" });
+    expect(createWritable).not.toHaveBeenCalled();
+  });
+
+  it("does not request permission after queryPermission grants it", async () => {
+    const queryPermission = vi.fn().mockResolvedValue("granted");
+    const requestPermission = vi.fn();
+    const createWritable = vi.fn().mockResolvedValue(writable());
+    vi.stubGlobal("window", {
+      showSaveFilePicker: vi.fn().mockResolvedValue({
+        queryPermission,
+        requestPermission,
+        createWritable,
+      }),
+    });
+
+    await expect(createFsaSink("file.bin")).resolves.toMatchObject({
+      strategy: "fsa",
+    });
+    expect(requestPermission).not.toHaveBeenCalled();
+    expect(createWritable).toHaveBeenCalledWith({ keepExistingData: true });
+  });
+
+  it("supports handles without optional permission methods", async () => {
+    const createWritable = vi.fn().mockResolvedValue(writable());
+    vi.stubGlobal("window", {
+      showSaveFilePicker: vi.fn().mockResolvedValue({ createWritable }),
+    });
+
+    await expect(createFsaSink("file.bin")).resolves.toMatchObject({
+      strategy: "fsa",
+    });
+  });
+
+  it("wraps createWritable failures with sink context and keeps the original text", async () => {
+    const originalMessage =
+      "Failed to execute 'createWritable' on 'FileSystemFileHandle': The request is not allowed by the user agent or the platform in the current context.";
+    vi.stubGlobal("window", {
+      showSaveFilePicker: vi.fn().mockResolvedValue({
+        createWritable: vi
+          .fn()
+          .mockRejectedValue(new DOMException(originalMessage, "NotAllowedError")),
+      }),
+    });
+
+    const error = await createFsaSink("file.bin").catch(
+      (reason: unknown) => reason,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/sink/i);
+    expect((error as Error).message).toContain(originalMessage);
   });
 });
 

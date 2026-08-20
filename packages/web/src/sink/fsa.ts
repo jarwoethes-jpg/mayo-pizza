@@ -11,10 +11,20 @@ interface CreateWritableOptions {
   keepExistingData?: boolean;
 }
 
+interface FilePermissionOptions {
+  mode: "readwrite";
+}
+
 interface FileHandleLike {
   createWritable(
     options?: CreateWritableOptions,
   ): Promise<WritableFileStreamLike>;
+  queryPermission?: (
+    options: FilePermissionOptions,
+  ) => Promise<PermissionState>;
+  requestPermission?: (
+    options: FilePermissionOptions,
+  ) => Promise<PermissionState>;
 }
 
 interface FilePickerWindow extends Window {
@@ -22,6 +32,49 @@ interface FilePickerWindow extends Window {
     suggestedName?: string;
   }) => Promise<FileHandleLike>;
 }
+
+const errorMessage = (reason: unknown): string => {
+  if (reason instanceof Error && reason.message !== "") {
+    return reason.message;
+  }
+  if (
+    typeof reason === "object" &&
+    reason !== null &&
+    "message" in reason &&
+    typeof reason.message === "string" &&
+    reason.message !== ""
+  ) {
+    return reason.message;
+  }
+  return "The browser did not provide more detail.";
+};
+
+const prepareWritable = async (
+  handle: FileHandleLike,
+): Promise<WritableFileStreamLike> => {
+  if (typeof handle.queryPermission === "function") {
+    let permission = await handle.queryPermission({ mode: "readwrite" });
+    if (
+      permission !== "granted" &&
+      typeof handle.requestPermission === "function"
+    ) {
+      permission = await handle.requestPermission({ mode: "readwrite" });
+    }
+    if (permission !== "granted") {
+      throw new Error(
+        "The download sink could not use the selected save location because write permission was not granted.",
+      );
+    }
+  }
+
+  try {
+    return await handle.createWritable({ keepExistingData: true });
+  } catch (error) {
+    throw new Error(
+      `Could not prepare the download sink at the selected save location: ${errorMessage(error)}`,
+    );
+  }
+};
 
 /**
  * Creates the File System Access sink. The picker call must remain before any
@@ -38,7 +91,7 @@ export const createFsaSink = (name: string): Promise<Sink> => {
   // Keep this invocation synchronous so Chromium associates it with the click.
   const handlePromise = picker({ suggestedName: name });
   return handlePromise.then((handle) =>
-    handle.createWritable({ keepExistingData: true }).then((writer) => {
+    prepareWritable(handle).then((writer) => {
       let closed = false;
       return {
         strategy: "fsa" as const,

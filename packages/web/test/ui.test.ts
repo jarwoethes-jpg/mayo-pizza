@@ -86,5 +86,11 @@ describe("failure copy mapping", () => {
         "downloader",
       ).heading,
     ).toBe("The save spot got messy.");
+    expect(
+      getFailureCopy(
+        "TRANSFER_FAILED: Failed to execute 'createWritable' on 'FileSystemFileHandle': The request is not allowed by the user agent or the platform in the current context.",
+        "downloader",
+      ).heading,
+    ).toBe("The save spot got messy.");
   });
 });
