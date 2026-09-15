@@ -25,6 +25,7 @@ services:
       RATE_LIMIT_MESSAGE: ${RATE_LIMIT_MESSAGE:-100}
       ROOM_TTL_MS: ${ROOM_TTL_MS:-1800000}
       ROOM_STATE_PATH: ${ROOM_STATE_PATH:-/app/state/rooms.json}
+      METRICS_STATE_PATH: ${METRICS_STATE_PATH:-/app/state/metrics.json}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       METRICS_TOKEN: ${METRICS_TOKEN:?METRICS_TOKEN must be set}
     healthcheck:

@@ -9,11 +9,15 @@ import Fastify, { type FastifyInstance, LogController } from "fastify";
 import { type SignalingMessage, signalingMessageSchema } from "shared";
 import WebSocket, { WebSocketServer } from "ws";
 import {
+  createMetricsState,
+  createMetricsStore,
+  type MetricsState,
+} from "./metricsStore.js";
+import {
   createRateLimiter,
   getClientIp,
   parseRateLimitOverrides,
   parseTrustedProxyList,
-  type RateLimitAction,
   type RateLimiter,
 } from "./ratelimit.js";
 import { createRoomStore } from "./roomStore.js";
@@ -29,6 +33,7 @@ import {
 import { createIceServers, createTurnConfig, type TurnConfig } from "./turn.js";
 
 const MAX_ROOM_PEERS = 2;
+const METRICS_FLUSH_DELAY_MS = 1_000;
 
 /**
  * Explicit Argon2id settings at the OWASP-recommended argon2id minimum.
@@ -102,34 +107,13 @@ type LogFields = {
   peerId?: string;
   ip?: string;
   role?: "uploader" | "downloader";
+  phase?: "ice" | "connection";
   roomCount?: number;
   code?: string;
   message?: string;
 };
 
 type EmitLog = (event: string, fields?: LogFields) => void;
-
-interface MetricsState {
-  roomsCreated: number;
-  roomsReaped: number;
-  passwordFailures: number;
-  tokenFailures: number;
-  roomsLocked: number;
-  malformed: number;
-  rateLimited: Record<RateLimitAction, number>;
-  connections: Record<"direct" | "relay", number>;
-}
-
-const createMetricsState = (): MetricsState => ({
-  roomsCreated: 0,
-  roomsReaped: 0,
-  passwordFailures: 0,
-  tokenFailures: 0,
-  roomsLocked: 0,
-  malformed: 0,
-  rateLimited: { create: 0, join: 0, message: 0 },
-  connections: { direct: 0, relay: 0 },
-});
 
 const getRoomForSession = (
   session: PeerSession,
@@ -180,6 +164,7 @@ const logAuthFailure = (
   session: PeerSession,
   rooms: RoomRegistry,
   metrics: MetricsState,
+  onMetricsChange: () => void,
   emitLog: EmitLog,
   event: "password_failed" | "token_failed",
   locked: boolean,
@@ -192,6 +177,7 @@ const logAuthFailure = (
   });
   if (locked) {
     metrics.roomsLocked += 1;
+    onMetricsChange();
     emitLog("room_locked", {
       peerId: session.id,
       ip: session.ip,
@@ -208,11 +194,13 @@ const handleMessage = async (
   rateLimiter: RateLimiter,
   turnConfig: TurnConfig,
   metrics: MetricsState,
+  onMetricsChange: () => void,
   emitLog: EmitLog,
 ): Promise<void> => {
   const messageLimit = rateLimiter.consume(session.ip, "message");
   if (!messageLimit.allowed) {
     metrics.rateLimited.message += 1;
+    onMetricsChange();
     emitLog("rate_limited", {
       peerId: session.id,
       ip: session.ip,
@@ -232,6 +220,7 @@ const handleMessage = async (
     candidate = JSON.parse(rawData.toString()) as unknown;
   } catch {
     metrics.malformed += 1;
+    onMetricsChange();
     emitLog("malformed", {
       peerId: session.id,
       ip: session.ip,
@@ -246,6 +235,7 @@ const handleMessage = async (
   const parsed = signalingMessageSchema.safeParse(candidate);
   if (!parsed.success || !isClientMessage(parsed.data)) {
     metrics.malformed += 1;
+    onMetricsChange();
     emitLog("malformed", {
       peerId: session.id,
       ip: session.ip,
@@ -265,6 +255,7 @@ const handleMessage = async (
   if (message.t === "create") {
     if (!rateLimiter.consume(session.ip, "create").allowed) {
       metrics.rateLimited.create += 1;
+      onMetricsChange();
       emitLog("rate_limited", {
         peerId: session.id,
         ip: session.ip,
@@ -297,6 +288,7 @@ const handleMessage = async (
     rooms.addPeer(room, session.id, session.socket);
     session.roomSlug = room.slug;
     metrics.roomsCreated += 1;
+    onMetricsChange();
     emitLog("room_created", {
       peerId: session.id,
       ip: session.ip,
@@ -313,6 +305,7 @@ const handleMessage = async (
   if (message.t === "join") {
     if (!rateLimiter.consume(session.ip, "join").allowed) {
       metrics.rateLimited.join += 1;
+      onMetricsChange();
       emitLog("rate_limited", {
         peerId: session.id,
         ip: session.ip,
@@ -355,7 +348,16 @@ const handleMessage = async (
       ) {
         rooms.recordTokenFailure(room);
         metrics.tokenFailures += 1;
-        logAuthFailure(session, rooms, metrics, emitLog, "token_failed", false);
+        onMetricsChange();
+        logAuthFailure(
+          session,
+          rooms,
+          metrics,
+          onMetricsChange,
+          emitLog,
+          "token_failed",
+          false,
+        );
         sendError(
           session.socket,
           "BAD_PASSWORD",
@@ -405,11 +407,13 @@ const handleMessage = async (
       const valid = await argon2.verify(room.passwordHash, message.password);
       if (!valid) {
         metrics.passwordFailures += 1;
+        onMetricsChange();
         const locked = rooms.recordPasswordFailure(room);
         logAuthFailure(
           session,
           rooms,
           metrics,
+          onMetricsChange,
           emitLog,
           "password_failed",
           locked,
@@ -495,7 +499,18 @@ const handleMessage = async (
     if (room === undefined) {
       return;
     }
-    metrics.connections[message.route] += 1;
+    if (message.event === "connected") {
+      metrics.connections[message.route] += 1;
+    } else {
+      metrics.connectionFailures[message.phase] += 1;
+      emitLog("connection_failed", {
+        peerId: session.id,
+        ip: session.ip,
+        phase: message.phase,
+        roomCount: rooms.rooms.size,
+      });
+    }
+    onMetricsChange();
     rooms.touchRoom(room);
     return;
   }
@@ -524,6 +539,7 @@ const attachWebSocketConnection = (
   turnConfig: TurnConfig,
   trustedProxies: readonly string[],
   metrics: MetricsState,
+  onMetricsChange: () => void,
   emitLog: EmitLog,
 ): void => {
   const session: PeerSession = {
@@ -546,9 +562,11 @@ const attachWebSocketConnection = (
       rateLimiter,
       turnConfig,
       metrics,
+      onMetricsChange,
       emitLog,
     ).catch(() => {
       metrics.malformed += 1;
+      onMetricsChange();
       emitLog("malformed", {
         peerId: session.id,
         ip: session.ip,
@@ -618,6 +636,10 @@ const renderMetrics = (
     "# TYPE mayo_connections_total counter",
     `mayo_connections_total{route="direct"} ${metrics.connections.direct}`,
     `mayo_connections_total{route="relay"} ${metrics.connections.relay}`,
+    "# HELP mayo_connection_failures_total Failed WebRTC connections by phase.",
+    "# TYPE mayo_connection_failures_total counter",
+    `mayo_connection_failures_total{phase="ice"} ${metrics.connectionFailures.ice}`,
+    `mayo_connection_failures_total{phase="connection"} ${metrics.connectionFailures.connection}`,
     "",
   ].join("\n");
 };
@@ -669,9 +691,35 @@ export const createServer = (options: ServerOptions = {}): ServerHandle => {
     },
     logController: new LogController({ disableRequestLogging: true }),
   });
-  const metrics = createMetricsState();
   const emitLog: EmitLog = (event, fields = {}) => {
     app.log.info({ event, ...fields });
+  };
+  const metricsStore =
+    process.env.METRICS_STATE_PATH === undefined
+      ? undefined
+      : createMetricsStore(process.env.METRICS_STATE_PATH, {
+          log: (message) => {
+            emitLog("metrics_store_error", { message });
+          },
+        });
+  const metrics = metricsStore?.load() ?? createMetricsState();
+  let metricsFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleMetricsFlush = (): void => {
+    if (metricsStore === undefined || metricsFlushTimer !== undefined) {
+      return;
+    }
+    metricsFlushTimer = setTimeout(() => {
+      metricsFlushTimer = undefined;
+      metricsStore.flush(metrics);
+    }, METRICS_FLUSH_DELAY_MS);
+    metricsFlushTimer.unref();
+  };
+  const flushMetrics = (): void => {
+    if (metricsFlushTimer !== undefined) {
+      clearTimeout(metricsFlushTimer);
+      metricsFlushTimer = undefined;
+    }
+    metricsStore?.flush(metrics);
   };
   const rooms =
     options.roomRegistry ??
@@ -691,6 +739,7 @@ export const createServer = (options: ServerOptions = {}): ServerHandle => {
   rooms.onRoomReaped = (room, roomCount) => {
     previousReapHandler?.(room, roomCount);
     metrics.roomsReaped += 1;
+    scheduleMetricsFlush();
     emitLog("room_reaped", { roomCount });
   };
   const rateLimiter =
@@ -764,6 +813,7 @@ export const createServer = (options: ServerOptions = {}): ServerHandle => {
       turnConfig,
       trustedProxies,
       metrics,
+      scheduleMetricsFlush,
       emitLog,
     );
   });
@@ -775,6 +825,7 @@ export const createServer = (options: ServerOptions = {}): ServerHandle => {
     }
     wsServer.close();
     rooms.dispose();
+    flushMetrics();
   });
 
   return {
@@ -801,7 +852,36 @@ export const startServer = async (port = 3000): Promise<ServerHandle> => {
   return server;
 };
 
+/**
+ * Builds a once-only shutdown callback that exits after the close settles.
+ *
+ * WHY: several signals can arrive during a container stop, and closing twice
+ * races Fastify's onClose hook against its own teardown.
+ */
+export const createShutdownHandler = (
+  close: () => Promise<void>,
+  exit: () => void,
+): (() => void) => {
+  let closing = false;
+  return () => {
+    if (closing) {
+      return;
+    }
+    closing = true;
+    void close().then(exit, exit);
+  };
+};
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number.parseInt(process.env.PORT ?? "3000", 10);
-  await startServer(port);
+  const server = await startServer(port);
+  // WHY: without these, SIGTERM from `docker stop` ends the process immediately
+  // and Fastify's onClose hook never runs, so peers get an abrupt TCP drop
+  // instead of the intended 1001 close and the final metrics flush is skipped.
+  const shutdown = createShutdownHandler(
+    () => server.close(),
+    () => process.exit(0),
+  );
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
 }

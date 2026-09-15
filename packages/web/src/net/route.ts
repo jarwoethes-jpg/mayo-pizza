@@ -1,6 +1,14 @@
 /** The transport path selected by the nominated ICE candidate pair. */
 export type SelectedRoute = "direct" | "relay";
 
+export type CandidateType = "host" | "srflx" | "prflx" | "relay";
+
+export interface CandidateTypeStats {
+  localCandidateTypes: CandidateType[];
+  remoteCandidateTypes: CandidateType[];
+  hadRelayCandidate: boolean;
+}
+
 type StatsCollection =
   | ReadonlyMap<string, unknown>
   | Iterable<unknown>
@@ -19,6 +27,12 @@ export interface SelectedRouteStats {
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
+
+const isCandidateType = (value: unknown): value is CandidateType =>
+  value === "host" ||
+  value === "srflx" ||
+  value === "prflx" ||
+  value === "relay";
 
 const valuesOf = (stats: StatsCollection): unknown[] => {
   try {
@@ -114,6 +128,41 @@ export const classifySelectedRoute = (
 ): SelectedRoute | undefined => {
   const selectedPair = findSelectedPair(stats);
   return selectedPair === undefined ? undefined : classifyPair(selectedPair);
+};
+
+/** Extracts only ICE candidate types so failure telemetry cannot expose candidate details. */
+export const readCandidateTypeStats = (
+  stats: StatsCollection,
+): CandidateTypeStats => {
+  const localCandidateTypes = new Set<CandidateType>();
+  const remoteCandidateTypes = new Set<CandidateType>();
+  try {
+    for (const report of valuesOf(stats)) {
+      if (!isRecord(report)) {
+        continue;
+      }
+      const candidateTypes =
+        report.type === "local-candidate"
+          ? localCandidateTypes
+          : report.type === "remote-candidate"
+            ? remoteCandidateTypes
+            : undefined;
+      if (
+        candidateTypes !== undefined &&
+        isCandidateType(report.candidateType)
+      ) {
+        candidateTypes.add(report.candidateType);
+      }
+    }
+  } catch {
+    // Stats are optional diagnostic input and must never affect the connection.
+  }
+  return {
+    localCandidateTypes: [...localCandidateTypes],
+    remoteCandidateTypes: [...remoteCandidateTypes],
+    hadRelayCandidate:
+      localCandidateTypes.has("relay") || remoteCandidateTypes.has("relay"),
+  };
 };
 
 /** Reads the nominated ICE pair and its optional transport and byte counters. */

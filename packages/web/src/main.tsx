@@ -16,6 +16,7 @@ import {
 import { createPeer, type PeerConnection, type PeerRole } from "./net/peer";
 import {
   classifySelectedRoute,
+  readCandidateTypeStats,
   readSelectedRouteStats,
   type SelectedRoute,
   type SelectedRouteStats,
@@ -218,6 +219,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
   const dragDepthRef = useRef(0);
   const progressAnnouncedRef = useRef(false);
   const routeStatSentRef = useRef(false);
+  const connectionFailureStatSentRef = useRef(false);
   const stagedSelectionRef = useRef(stagedSelection);
   const transferPhaseRef = useRef(transferUi.phase);
   const peerAttachedRef = useRef(false);
@@ -230,6 +232,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
   // biome-ignore lint/correctness/useExhaustiveDependencies: roomGeneration intentionally restarts the room lifecycle.
   useEffect(() => {
     routeStatSentRef.current = false;
+    connectionFailureStatSentRef.current = false;
     connectionStateRef.current = "new";
     peerAttachedRef.current = false;
     silentRoomRemintPendingRef.current = false;
@@ -427,6 +430,28 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       }
     };
 
+    const reportConnectionFailure = (phase: "ice" | "connection"): void => {
+      if (role !== "downloader" || connectionFailureStatSentRef.current) {
+        return;
+      }
+      connectionFailureStatSentRef.current = true;
+      void peer
+        .getStats()
+        .then((stats) => readCandidateTypeStats(stats))
+        .catch(() => undefined)
+        .then((candidateStats) =>
+          signaling.send({
+            t: "stat",
+            event: "failed",
+            phase,
+            ...(candidateStats === undefined ? {} : candidateStats),
+          }),
+        )
+        .catch(() => {
+          // Failure telemetry is deliberately best-effort and never gates a transfer.
+        });
+    };
+
     const unsubscribeConnection = peer.connectionState.subscribe((state) => {
       connectionStateRef.current = state;
       setConnectionState(state);
@@ -439,6 +464,9 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       } else if (state === "new" || state === "connecting") {
         setSessionStatus("connecting");
       } else if (state === "disconnected" || state === "failed") {
+        if (state === "failed") {
+          reportConnectionFailure("connection");
+        }
         stopStatsSampling();
         setSessionStatus("reconnecting");
         setAnnouncement(
@@ -446,9 +474,12 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
         );
       }
     });
-    const unsubscribeIce = peer.iceConnectionState.subscribe(
-      setIceConnectionState,
-    );
+    const unsubscribeIce = peer.iceConnectionState.subscribe((state) => {
+      setIceConnectionState(state);
+      if (state === "failed") {
+        reportConnectionFailure("ice");
+      }
+    });
     const unsubscribeCtrl = peer.on("ctrl-open", () => {
       setLog("Ctrl channel open.");
       sendAutoPing();

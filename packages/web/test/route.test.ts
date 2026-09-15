@@ -1,10 +1,48 @@
 import { describe, expect, it } from "vitest";
 import {
   classifySelectedRoute,
+  readCandidateTypeStats,
   readSelectedRouteStats,
 } from "../src/net/route";
 
 describe("selected WebRTC route", () => {
+  it("extracts candidate types without retaining raw candidate details", () => {
+    const stats = new Map([
+      [
+        "local-host",
+        {
+          type: "local-candidate",
+          candidateType: "host",
+          candidate: "candidate:raw-local-candidate",
+        },
+      ],
+      [
+        "local-relay",
+        {
+          type: "local-candidate",
+          candidateType: "relay",
+          address: "192.0.2.1",
+          port: 54321,
+        },
+      ],
+      [
+        "remote-srflx",
+        {
+          type: "remote-candidate",
+          candidateType: "srflx",
+          usernameFragment: "private-ufrag",
+        },
+      ],
+      ["ignored", { type: "candidate-pair", candidateType: "prflx" }],
+    ]);
+
+    expect(readCandidateTypeStats(stats)).toEqual({
+      localCandidateTypes: ["host", "relay"],
+      remoteCandidateTypes: ["srflx"],
+      hadRelayCandidate: true,
+    });
+  });
+
   it.each([
     ["relay local", "relay", "host", "relay"],
     ["relay remote", "srflx", "relay", "relay"],

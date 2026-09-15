@@ -14,6 +14,15 @@ const validMessages = [
   { t: "close" },
   { t: "stat", event: "connected", route: "direct" },
   { t: "stat", event: "connected", route: "relay" },
+  {
+    t: "stat",
+    event: "failed",
+    phase: "ice",
+    localCandidateTypes: ["host", "srflx"],
+    remoteCandidateTypes: ["relay"],
+    hadRelayCandidate: true,
+  },
+  { t: "stat", event: "failed", phase: "connection" },
   { t: "created", slug: "mushroom-olive-basil-42", uploaderToken: "token" },
   { t: "joined", peerId: "peer-2", role: "downloader" },
   { t: "peer-joined", peerId: "peer-2" },
@@ -52,6 +61,20 @@ const invalidMessages = [
   { t: "signal", from: "peer-2" },
   { t: "stat", event: "connected", route: "other" },
   { t: "stat", event: "connected", route: "direct", extra: true },
+  {
+    t: "stat",
+    event: "failed",
+    phase: "ice",
+    localCandidateTypes: [
+      "candidate:1 1 UDP 2122260223 192.0.2.1 54321 typ host",
+    ],
+  },
+  {
+    t: "stat",
+    event: "failed",
+    phase: "connection",
+    candidate: "candidate:1 1 UDP 2122260223 192.0.2.1 54321 typ host",
+  },
   { t: "ice-config", iceServers: "stun:mayo.pizza:3478" },
   { t: "error", code: "NOT_A_REAL_CODE", message: "nope" },
   {

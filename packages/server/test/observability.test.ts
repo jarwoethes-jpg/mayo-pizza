@@ -273,6 +273,88 @@ describe("observability endpoints", () => {
     }
   });
 
+  it("records failed WebRTC connection stats without logging candidate details", async () => {
+    vi.stubEnv("LOG_LEVEL", "info");
+    vi.stubEnv("METRICS_TOKEN", "metrics-secret");
+    const logs: string[] = [];
+    const logStream = new Writable({
+      write(chunk, _encoding, callback) {
+        logs.push(chunk.toString());
+        callback();
+      },
+    });
+    const server = createServer({ logStream });
+
+    try {
+      const uploader = createFakeSocket();
+      const downloader = createFakeSocket();
+      connectFakeSocket(server, uploader);
+      connectFakeSocket(server, downloader);
+      uploader.emitMessage({ t: "create" });
+      const created = await waitForFrame(
+        uploader,
+        (frame) => frame.t === "created",
+      );
+      if (typeof created.slug !== "string") {
+        throw new Error("The fake create flow did not return a slug.");
+      }
+      downloader.emitMessage({ t: "join", slug: created.slug });
+      const joined = await waitForFrame(
+        downloader,
+        (frame) => frame.t === "joined",
+      );
+
+      downloader.emitMessage({
+        t: "stat",
+        event: "failed",
+        phase: "ice",
+        localCandidateTypes: ["host"],
+        remoteCandidateTypes: ["relay"],
+        hadRelayCandidate: true,
+      });
+      downloader.emitMessage({
+        t: "stat",
+        event: "failed",
+        phase: "connection",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const response = await server.app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: { authorization: "Bearer metrics-secret" },
+      });
+      expect(response.body).toContain(
+        'mayo_connection_failures_total{phase="ice"} 1',
+      );
+      expect(response.body).toContain(
+        'mayo_connection_failures_total{phase="connection"} 1',
+      );
+      const failureLogs = logs
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((line) => line.event === "connection_failed");
+      expect(failureLogs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            peerId: joined.peerId,
+            ip: "127.0.0.1",
+            phase: "ice",
+            roomCount: 1,
+          }),
+          expect.objectContaining({
+            peerId: joined.peerId,
+            ip: "127.0.0.1",
+            phase: "connection",
+            roomCount: 1,
+          }),
+        ]),
+      );
+      expect(logs.join("")).not.toContain("candidate:");
+    } finally {
+      await server.close();
+    }
+  });
+
   it("keeps token and password failure counters and events separate", async () => {
     vi.stubEnv("LOG_LEVEL", "info");
     vi.stubEnv("METRICS_TOKEN", "metrics-secret");

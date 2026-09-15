@@ -22,6 +22,8 @@ const nonPasswordErrorCodeSchema = signalingErrorCodeSchema.refine(
   (code) => code !== "BAD_PASSWORD",
 );
 const requiredPayloadSchema = z.custom<unknown>((value) => value !== undefined);
+const candidateTypeSchema = z.enum(["host", "srflx", "prflx", "relay"]);
+const candidateTypesSchema = z.array(candidateTypeSchema).max(8);
 
 const signalingErrorSchema = z.union([
   z
@@ -73,13 +75,25 @@ export const signalingMessageSchema = z.union([
       t: z.literal("close"),
     })
     .strict(),
-  z
-    .object({
-      t: z.literal("stat"),
-      event: z.literal("connected"),
-      route: z.enum(["direct", "relay"]),
-    })
-    .strict(),
+  z.union([
+    z
+      .object({
+        t: z.literal("stat"),
+        event: z.literal("connected"),
+        route: z.enum(["direct", "relay"]),
+      })
+      .strict(),
+    z
+      .object({
+        t: z.literal("stat"),
+        event: z.literal("failed"),
+        phase: z.enum(["ice", "connection"]),
+        localCandidateTypes: candidateTypesSchema.optional(),
+        remoteCandidateTypes: candidateTypesSchema.optional(),
+        hadRelayCandidate: z.boolean().optional(),
+      })
+      .strict(),
+  ]),
   z
     .object({
       t: z.literal("created"),
