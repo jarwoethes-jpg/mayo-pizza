@@ -273,7 +273,7 @@ describe("observability endpoints", () => {
     }
   });
 
-  it("records failed WebRTC connection stats without logging candidate details", async () => {
+  it("records failed WebRTC connection stats and candidate diagnostics", async () => {
     vi.stubEnv("LOG_LEVEL", "info");
     vi.stubEnv("METRICS_TOKEN", "metrics-secret");
     const logs: string[] = [];
@@ -351,6 +351,9 @@ describe("observability endpoints", () => {
             ip: "127.0.0.1",
             phase: "ice",
             roomCount: 1,
+            localCandidateTypes: ["host"],
+            remoteCandidateTypes: ["relay"],
+            hadRelayCandidate: true,
           }),
           expect.objectContaining({
             peerId: joined.peerId,
@@ -363,10 +366,19 @@ describe("observability endpoints", () => {
             ip: "127.0.0.1",
             phase: "stall",
             roomCount: 1,
+            localCandidateTypes: ["host", "relay"],
+            remoteCandidateTypes: ["srflx"],
+            hadRelayCandidate: true,
           }),
         ]),
       );
-      expect(logs.join("")).not.toContain("candidate:");
+      const connectionLog = failureLogs.find(
+        (line) => line.phase === "connection",
+      );
+      expect(connectionLog).toBeDefined();
+      expect(connectionLog).not.toHaveProperty("localCandidateTypes");
+      expect(connectionLog).not.toHaveProperty("remoteCandidateTypes");
+      expect(connectionLog).not.toHaveProperty("hadRelayCandidate");
     } finally {
       await server.close();
     }

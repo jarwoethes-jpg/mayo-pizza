@@ -108,6 +108,9 @@ type LogFields = {
   ip?: string;
   role?: "uploader" | "downloader";
   phase?: "ice" | "connection" | "stall";
+  localCandidateTypes?: string[];
+  remoteCandidateTypes?: string[];
+  hadRelayCandidate?: boolean;
   roomCount?: number;
   code?: string;
   message?: string;
@@ -507,6 +510,15 @@ const handleMessage = async (
         peerId: session.id,
         ip: session.ip,
         phase: message.phase,
+        ...(message.localCandidateTypes === undefined
+          ? {}
+          : { localCandidateTypes: message.localCandidateTypes }),
+        ...(message.remoteCandidateTypes === undefined
+          ? {}
+          : { remoteCandidateTypes: message.remoteCandidateTypes }),
+        ...(message.hadRelayCandidate === undefined
+          ? {}
+          : { hadRelayCandidate: message.hadRelayCandidate }),
         roomCount: rooms.rooms.size,
       });
     }

@@ -36,7 +36,10 @@ class FakeDataChannel {
 
 class FakePeerConnection {
   public static instances: FakePeerConnection[] = [];
+  public static restartIceSucceeds = false;
   public readonly configuration: RTCConfiguration;
+  public restartIceCalls = 0;
+  public readonly createOfferCalls: Array<RTCOfferOptions | undefined> = [];
   public connectionState: RTCPeerConnectionState = "new";
   public iceConnectionState: RTCIceConnectionState = "new";
   public readonly sctp = { maxMessageSize: 1_000_000 };
@@ -56,7 +59,10 @@ class FakePeerConnection {
     return new FakeDataChannel(label);
   }
 
-  public async createOffer(): Promise<RTCSessionDescriptionInit> {
+  public async createOffer(
+    options?: RTCOfferOptions,
+  ): Promise<RTCSessionDescriptionInit> {
+    this.createOfferCalls.push(options);
     return {
       type: "offer",
       sdp: `offer-${FakePeerConnection.instances.length}`,
@@ -86,7 +92,10 @@ class FakePeerConnection {
   }
 
   public restartIce(): void {
-    throw new Error("restart unavailable in fake");
+    this.restartIceCalls += 1;
+    if (!FakePeerConnection.restartIceSucceeds) {
+      throw new Error("restart unavailable in fake");
+    }
   }
 
   public close(): void {
@@ -104,6 +113,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   FakePeerConnection.instances = [];
+  FakePeerConnection.restartIceSucceeds = false;
 });
 
 describe("remote ICE candidate queue", () => {
@@ -127,9 +137,10 @@ describe("remote ICE candidate queue", () => {
 });
 
 describe("initial ICE stall recovery", () => {
-  it("escalates one stalled negotiation to relay and renegotiates", async () => {
+  it("restarts one stalled negotiation without forcing relay", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
+    FakePeerConnection.restartIceSucceeds = true;
 
     const listeners = new Map<string, Set<(payload: never) => void>>();
     const rebuildSignals: unknown[] = [];
@@ -175,21 +186,22 @@ describe("initial ICE stall recovery", () => {
     await flushPromises();
 
     expect(stalls).toHaveBeenCalledOnce();
+    expect(directPeer.restartIceCalls).toBe(1);
+    expect(directPeer.createOfferCalls).toContainEqual({ iceRestart: true });
+    expect(directPeer.configuration.iceTransportPolicy).toBeUndefined();
     expect(FakePeerConnection.instances).toHaveLength(1);
 
     await vi.advanceTimersByTimeAsync(250);
     await flushPromises();
 
-    expect(FakePeerConnection.instances).toHaveLength(2);
-    expect(FakePeerConnection.instances[1]?.configuration).toMatchObject({
-      iceTransportPolicy: "relay",
-    });
-    expect(rebuildSignals).toHaveLength(1);
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(rebuildSignals).toHaveLength(0);
 
     await vi.advanceTimersByTimeAsync(9_000);
     await flushPromises();
     expect(stalls).toHaveBeenCalledOnce();
-    expect(FakePeerConnection.instances).toHaveLength(2);
+    expect(directPeer.restartIceCalls).toBe(1);
+    expect(FakePeerConnection.instances).toHaveLength(1);
     peer.close();
   });
 

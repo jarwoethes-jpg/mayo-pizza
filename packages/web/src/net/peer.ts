@@ -9,10 +9,12 @@ import type { SignalingClient } from "./signaling";
 
 export const LOW_THRESHOLD = 1 * 1024 * 1024;
 
-// WHY: twelve seconds gives ICE gathering, TURN allocation, and trickle
-// signaling several round trips on slower networks, while bounding a
-// first-connection "checking" stall well before a user abandons the room.
-export const FIRST_CONNECTION_STALL_TIMEOUT_MS = 12_000;
+// WHY: twenty seconds gives Chromium's ICE gathering, TURN allocation, and
+// trickle signaling enough time on slow mobile/NAT paths without waiting for
+// its much longer ICE failure timeout. Relay candidates are already in the
+// candidate pool, so this is a re-gather, not a route change: host, srflx, and
+// relay candidates remain in play.
+export const FIRST_CONNECTION_STALL_TIMEOUT_MS = 20_000;
 const MAX_RECOVERY_ATTEMPTS = 5;
 
 export type PeerRole = "uploader" | "downloader";
@@ -170,9 +172,9 @@ const makeNonce = (): string => {
 
 /**
  * Owns one WebRTC generation and its recovery ladder. A first ICE negotiation
- * that stalls for twelve seconds escalates to relay; a disconnected ICE state
- * gets three seconds to heal; failed ICE first tries an ICE restart, then
- * replaces the entire peer connection. Five consecutive restart/rebuild
+ * that stalls for twenty seconds gets an ICE restart; a disconnected ICE
+ * state gets three seconds to heal; failed ICE first tries an ICE restart,
+ * then replaces the entire peer connection. Five consecutive restart/rebuild
  * failures are terminal so a partial transfer can be discarded by its owner.
  */
 class PeerConnectionImpl implements PeerConnection {
@@ -222,7 +224,6 @@ class PeerConnectionImpl implements PeerConnection {
     | ReturnType<typeof globalThis.setTimeout>
     | undefined;
   private firstConnectionStallHandled = false;
-  private relayEscalated = false;
   private recoveryTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
   private recoveryAttempt = 0;
   private recoveryInFlight = false;
@@ -903,8 +904,6 @@ class PeerConnectionImpl implements PeerConnection {
     if (
       this.closed ||
       this.peerConnection !== peerConnection ||
-      this.configuration?.iceTransportPolicy === "relay" ||
-      this.relayEscalated ||
       peerConnection.iceConnectionState === "connected" ||
       peerConnection.iceConnectionState === "completed"
     ) {
@@ -938,30 +937,16 @@ class PeerConnectionImpl implements PeerConnection {
       this.emitExhausted();
       return;
     }
-    if (this.configuration?.iceTransportPolicy === "relay") {
-      return;
-    }
-
-    this.relayEscalated = true;
-    this.configuration = {
-      ...this.configuration,
-      iceTransportPolicy: "relay",
-    };
     if (!this.signalingOpen || !this.signaling.isOpen) {
       this.rebuildPending = true;
       return;
     }
-    if (this.rebuildInFlight) {
-      this.rebuildAgainPending = true;
-      this.rebuildAgainSignal = true;
+    if (this.rebuildInFlight || this.recoveryInFlight) {
+      // An existing recovery or rebuild owns the current generation. Do not
+      // start a second recovery pass for the same stall.
       return;
     }
-    if (this.recoveryInFlight) {
-      // An existing disconnected/failed recovery owns the current generation;
-      // its pending rebuild will use the relay policy just selected here.
-      return;
-    }
-    void this.scheduleRebuild().catch((error: unknown) =>
+    void this.tryIceRestart().catch((error: unknown) =>
       this.emitError(error),
     );
   }
