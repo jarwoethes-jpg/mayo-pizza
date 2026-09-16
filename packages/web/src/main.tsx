@@ -13,10 +13,14 @@ import {
   type FolderCollection,
   mapInputFiles,
 } from "./folder/entries";
+import {
+  installCheckingConnectionFailureReporter,
+  sendConnectionFailureStat,
+  type ConnectionFailurePhase,
+} from "./net/failure";
 import { createPeer, type PeerConnection, type PeerRole } from "./net/peer";
 import {
   classifySelectedRoute,
-  readCandidateTypeStats,
   readSelectedRouteStats,
   type SelectedRoute,
   type SelectedRouteStats,
@@ -215,6 +219,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
   const acceptFailedRef = useRef(false);
   const autoPingSent = useRef(false);
   const connectionStateRef = useRef<RTCPeerConnectionState>("new");
+  const iceConnectionStateRef = useRef<RTCIceConnectionState>("new");
   const resumePendingRef = useRef(false);
   const dragDepthRef = useRef(0);
   const progressAnnouncedRef = useRef(false);
@@ -234,6 +239,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     routeStatSentRef.current = false;
     connectionFailureStatSentRef.current = false;
     connectionStateRef.current = "new";
+    iceConnectionStateRef.current = "new";
     peerAttachedRef.current = false;
     silentRoomRemintPendingRef.current = false;
     setSelectedRoute(undefined);
@@ -430,27 +436,23 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       }
     };
 
-    const reportConnectionFailure = (phase: "ice" | "connection"): void => {
+    const reportConnectionFailure = (
+      phase: ConnectionFailurePhase,
+      getStats: () => Promise<RTCStatsReport> = () => peer.getStats(),
+    ): void => {
       if (role !== "downloader" || connectionFailureStatSentRef.current) {
         return;
       }
       connectionFailureStatSentRef.current = true;
-      void peer
-        .getStats()
-        .then((stats) => readCandidateTypeStats(stats))
-        .catch(() => undefined)
-        .then((candidateStats) =>
-          signaling.send({
-            t: "stat",
-            event: "failed",
-            phase,
-            ...(candidateStats === undefined ? {} : candidateStats),
-          }),
-        )
-        .catch(() => {
-          // Failure telemetry is deliberately best-effort and never gates a transfer.
-        });
+      sendConnectionFailureStat(peer, signaling, phase, getStats);
     };
+
+    const uninstallPagehideFailureReporter =
+      installCheckingConnectionFailureReporter(
+        window,
+        () => iceConnectionStateRef.current,
+        () => reportConnectionFailure("stall"),
+      );
 
     const unsubscribeConnection = peer.connectionState.subscribe((state) => {
       connectionStateRef.current = state;
@@ -475,10 +477,14 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       }
     });
     const unsubscribeIce = peer.iceConnectionState.subscribe((state) => {
+      iceConnectionStateRef.current = state;
       setIceConnectionState(state);
       if (state === "failed") {
         reportConnectionFailure("ice");
       }
+    });
+    const unsubscribeIceStall = peer.on("ice-stall", ({ getStats }) => {
+      reportConnectionFailure("stall", getStats);
     });
     const unsubscribeCtrl = peer.on("ctrl-open", () => {
       setLog("Ctrl channel open.");
@@ -673,6 +679,8 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       stopStatsSampling();
       unsubscribeConnection();
       unsubscribeIce();
+      unsubscribeIceStall();
+      uninstallPagehideFailureReporter();
       unsubscribeCtrl();
       unsubscribeData();
       unsubscribeReconnecting();

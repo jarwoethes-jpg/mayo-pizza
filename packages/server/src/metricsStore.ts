@@ -17,7 +17,7 @@ export interface MetricsState {
   malformed: number;
   rateLimited: Record<RateLimitAction, number>;
   connections: Record<"direct" | "relay", number>;
-  connectionFailures: Record<"ice" | "connection", number>;
+  connectionFailures: Record<"ice" | "connection" | "stall", number>;
 }
 
 interface MetricsSnapshot {
@@ -77,7 +77,9 @@ const isMetricsState = (value: unknown): value is MetricsState =>
   isCounter(value.connections.relay) &&
   isRecord(value.connectionFailures) &&
   isCounter(value.connectionFailures.ice) &&
-  isCounter(value.connectionFailures.connection);
+  isCounter(value.connectionFailures.connection) &&
+  (value.connectionFailures.stall === undefined ||
+    isCounter(value.connectionFailures.stall));
 
 const isMetricsSnapshot = (value: unknown): value is MetricsSnapshot =>
   isRecord(value) && value.version === 1 && isMetricsState(value.counters);
@@ -101,6 +103,7 @@ const toPersistedMetrics = (metrics: MetricsState): MetricsState => ({
   connectionFailures: {
     ice: metrics.connectionFailures.ice,
     connection: metrics.connectionFailures.connection,
+    stall: metrics.connectionFailures.stall ?? 0,
   },
 });
 
@@ -118,7 +121,7 @@ export const createMetricsState = (): MetricsState => ({
   malformed: 0,
   rateLimited: { create: 0, join: 0, message: 0 },
   connections: { direct: 0, relay: 0 },
-  connectionFailures: { ice: 0, connection: 0 },
+  connectionFailures: { ice: 0, connection: 0, stall: 0 },
 });
 
 // WHY: this intentionally supports one app container only; a JSON file is not multi-instance safe.

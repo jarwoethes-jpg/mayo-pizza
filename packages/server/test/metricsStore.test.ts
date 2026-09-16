@@ -34,7 +34,7 @@ const sampleMetrics = (): MetricsState => ({
   malformed: 3,
   rateLimited: { create: 6, join: 8, message: 9 },
   connections: { direct: 10, relay: 12 },
-  connectionFailures: { ice: 13, connection: 14 },
+  connectionFailures: { ice: 13, connection: 14, stall: 15 },
 });
 
 interface MemoryFileSystem extends MetricsStoreFileSystem {
@@ -91,6 +91,25 @@ describe("metrics snapshot store", () => {
     expect(fileSystem.renamedPaths).toHaveLength(1);
     expect(fileSystem.renamedPaths[0]?.newPath).toBe(filePath);
     expect(store.load()).toEqual(metrics);
+  });
+
+  it("keeps legacy snapshots and defaults the newly added stall counter", () => {
+    const filePath = "state/metrics.json";
+    const fileSystem = createMemoryFileSystem();
+    const legacyMetrics = {
+      ...sampleMetrics(),
+      connectionFailures: { ice: 13, connection: 14 },
+    };
+    fileSystem.files.set(
+      filePath,
+      JSON.stringify({ version: 1, counters: legacyMetrics }),
+    );
+    const store = createMetricsStore(filePath, { fileSystem });
+
+    expect(store.load()).toEqual({
+      ...legacyMetrics,
+      connectionFailures: { ice: 13, connection: 14, stall: 0 },
+    });
   });
 
   it("does not restore live gauges or write them to the snapshot", () => {
@@ -180,6 +199,9 @@ describe("metrics snapshot store", () => {
       expect(response.body).toContain("mayo_rooms_created_total 11");
       expect(response.body).toContain(
         'mayo_connection_failures_total{phase="ice"} 13',
+      );
+      expect(response.body).toContain(
+        'mayo_connection_failures_total{phase="stall"} 15',
       );
     } finally {
       await server.close();

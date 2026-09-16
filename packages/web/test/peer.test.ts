@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPeer, RemoteIceCandidateQueue } from "../src/net/peer";
+import {
+  createPeer,
+  FIRST_CONNECTION_STALL_TIMEOUT_MS,
+  RemoteIceCandidateQueue,
+} from "../src/net/peer";
 import type { SignalingClient } from "../src/net/signaling";
 
 type Listener = (event?: unknown) => void;
@@ -32,6 +36,7 @@ class FakeDataChannel {
 
 class FakePeerConnection {
   public static instances: FakePeerConnection[] = [];
+  public readonly configuration: RTCConfiguration;
   public connectionState: RTCPeerConnectionState = "new";
   public iceConnectionState: RTCIceConnectionState = "new";
   public readonly sctp = { maxMessageSize: 1_000_000 };
@@ -42,7 +47,8 @@ class FakePeerConnection {
   public ondatachannel: ((event: { channel: FakeDataChannel }) => void) | null =
     null;
 
-  public constructor(_configuration: RTCConfiguration) {
+  public constructor(configuration: RTCConfiguration) {
+    this.configuration = configuration;
     FakePeerConnection.instances.push(this);
   }
 
@@ -69,6 +75,10 @@ class FakePeerConnection {
 
   public async addIceCandidate(): Promise<void> {
     // No ICE candidates are needed for this state-machine test.
+  }
+
+  public async getStats(): Promise<RTCStatsReport> {
+    return new Map() as RTCStatsReport;
   }
 
   public async createAnswer(): Promise<RTCSessionDescriptionInit> {
@@ -113,6 +123,166 @@ describe("remote ICE candidate queue", () => {
 
     expect(flushed).toEqual(["candidate-1", "candidate-2"]);
     expect(queue.size).toBe(0);
+  });
+});
+
+describe("initial ICE stall recovery", () => {
+  it("escalates one stalled negotiation to relay and renegotiates", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
+
+    const listeners = new Map<string, Set<(payload: never) => void>>();
+    const rebuildSignals: unknown[] = [];
+    const signaling = {
+      isOpen: true,
+      on(event: string, listener: (payload: never) => void) {
+        const eventListeners = listeners.get(event) ?? new Set();
+        eventListeners.add(listener);
+        listeners.set(event, eventListeners);
+        return () => eventListeners.delete(listener);
+      },
+      requestIceConfig: async () => [],
+      sendSignal: async (_to: string, payload: unknown) => {
+        if (
+          typeof payload === "object" &&
+          payload !== null &&
+          (payload as { mayo?: unknown }).mayo === "rebuild"
+        ) {
+          rebuildSignals.push(payload);
+        }
+      },
+    } as unknown as SignalingClient;
+    const emit = (event: string, payload: never): void => {
+      for (const listener of listeners.get(event) ?? []) {
+        listener(payload);
+      }
+    };
+    const peer = createPeer("uploader", signaling);
+    const stalls = vi.fn();
+    peer.on("ice-stall", stalls);
+
+    await peer.ready;
+    emit("peer-joined", { t: "peer-joined", peerId: "remote" } as never);
+    await flushPromises();
+
+    const directPeer = FakePeerConnection.instances[0];
+    if (directPeer === undefined) {
+      throw new Error("The fake peer was not constructed.");
+    }
+    expect(directPeer.configuration.iceTransportPolicy).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(FIRST_CONNECTION_STALL_TIMEOUT_MS);
+    await flushPromises();
+
+    expect(stalls).toHaveBeenCalledOnce();
+    expect(FakePeerConnection.instances).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(250);
+    await flushPromises();
+
+    expect(FakePeerConnection.instances).toHaveLength(2);
+    expect(FakePeerConnection.instances[1]?.configuration).toMatchObject({
+      iceTransportPolicy: "relay",
+    });
+    expect(rebuildSignals).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(9_000);
+    await flushPromises();
+    expect(stalls).toHaveBeenCalledOnce();
+    expect(FakePeerConnection.instances).toHaveLength(2);
+    peer.close();
+  });
+
+  it("does not escalate after ICE connects before the deadline", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
+
+    const listeners = new Map<string, Set<(payload: never) => void>>();
+    const signaling = {
+      isOpen: true,
+      on(event: string, listener: (payload: never) => void) {
+        const eventListeners = listeners.get(event) ?? new Set();
+        eventListeners.add(listener);
+        listeners.set(event, eventListeners);
+        return () => eventListeners.delete(listener);
+      },
+      requestIceConfig: async () => [],
+      sendSignal: async () => undefined,
+    } as unknown as SignalingClient;
+    const emit = (event: string, payload: never): void => {
+      for (const listener of listeners.get(event) ?? []) {
+        listener(payload);
+      }
+    };
+    const peer = createPeer("uploader", signaling);
+    const stalls = vi.fn();
+
+    await peer.ready;
+    emit("peer-joined", { t: "peer-joined", peerId: "remote" } as never);
+    await flushPromises();
+    const currentPeer = FakePeerConnection.instances[0];
+    if (currentPeer === undefined) {
+      throw new Error("The fake peer was not constructed.");
+    }
+    peer.on("ice-stall", stalls);
+
+    currentPeer.iceConnectionState = "completed";
+    currentPeer.oniceconnectionstatechange?.();
+    await vi.advanceTimersByTimeAsync(FIRST_CONNECTION_STALL_TIMEOUT_MS);
+    await flushPromises();
+
+    expect(stalls).not.toHaveBeenCalled();
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    peer.close();
+  });
+
+  it("cancels the watchdog on close and does not duplicate disconnected recovery", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("RTCPeerConnection", FakePeerConnection);
+
+    const listeners = new Map<string, Set<(payload: never) => void>>();
+    const signaling = {
+      isOpen: true,
+      on(event: string, listener: (payload: never) => void) {
+        const eventListeners = listeners.get(event) ?? new Set();
+        eventListeners.add(listener);
+        listeners.set(event, eventListeners);
+        return () => eventListeners.delete(listener);
+      },
+      requestIceConfig: async () => [],
+      sendSignal: async () => undefined,
+    } as unknown as SignalingClient;
+    const emit = (event: string, payload: never): void => {
+      for (const listener of listeners.get(event) ?? []) {
+        listener(payload);
+      }
+    };
+    const peer = createPeer("uploader", signaling);
+    const stalls = vi.fn();
+    peer.on("ice-stall", stalls);
+
+    await peer.ready;
+    emit("peer-joined", { t: "peer-joined", peerId: "remote" } as never);
+    await flushPromises();
+    const currentPeer = FakePeerConnection.instances[0];
+    if (currentPeer === undefined) {
+      throw new Error("The fake peer was not constructed.");
+    }
+
+    currentPeer.iceConnectionState = "disconnected";
+    currentPeer.oniceconnectionstatechange?.();
+    await vi.advanceTimersByTimeAsync(3_500);
+    await flushPromises();
+    expect(FakePeerConnection.instances).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(8_000);
+    await flushPromises();
+    expect(FakePeerConnection.instances).toHaveLength(2);
+
+    peer.close();
+    await vi.advanceTimersByTimeAsync(FIRST_CONNECTION_STALL_TIMEOUT_MS);
+    expect(stalls).not.toHaveBeenCalled();
+    expect(FakePeerConnection.instances).toHaveLength(2);
   });
 });
 

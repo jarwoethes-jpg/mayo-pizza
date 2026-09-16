@@ -317,6 +317,14 @@ describe("observability endpoints", () => {
         event: "failed",
         phase: "connection",
       });
+      downloader.emitMessage({
+        t: "stat",
+        event: "failed",
+        phase: "stall",
+        localCandidateTypes: ["host", "relay"],
+        remoteCandidateTypes: ["srflx"],
+        hadRelayCandidate: true,
+      });
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       const response = await server.app.inject({
@@ -329,6 +337,9 @@ describe("observability endpoints", () => {
       );
       expect(response.body).toContain(
         'mayo_connection_failures_total{phase="connection"} 1',
+      );
+      expect(response.body).toContain(
+        'mayo_connection_failures_total{phase="stall"} 1',
       );
       const failureLogs = logs
         .map((line) => JSON.parse(line) as Record<string, unknown>)
@@ -345,6 +356,12 @@ describe("observability endpoints", () => {
             peerId: joined.peerId,
             ip: "127.0.0.1",
             phase: "connection",
+            roomCount: 1,
+          }),
+          expect.objectContaining({
+            peerId: joined.peerId,
+            ip: "127.0.0.1",
+            phase: "stall",
             roomCount: 1,
           }),
         ]),

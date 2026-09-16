@@ -87,7 +87,7 @@ export const signalingMessageSchema = z.union([
       .object({
         t: z.literal("stat"),
         event: z.literal("failed"),
-        phase: z.enum(["ice", "connection"]),
+        phase: z.enum(["ice", "connection", "stall"]),
         localCandidateTypes: candidateTypesSchema.optional(),
         remoteCandidateTypes: candidateTypesSchema.optional(),
         hadRelayCandidate: z.boolean().optional(),

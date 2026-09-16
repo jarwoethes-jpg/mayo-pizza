@@ -107,7 +107,7 @@ type LogFields = {
   peerId?: string;
   ip?: string;
   role?: "uploader" | "downloader";
-  phase?: "ice" | "connection";
+  phase?: "ice" | "connection" | "stall";
   roomCount?: number;
   code?: string;
   message?: string;
@@ -640,6 +640,7 @@ const renderMetrics = (
     "# TYPE mayo_connection_failures_total counter",
     `mayo_connection_failures_total{phase="ice"} ${metrics.connectionFailures.ice}`,
     `mayo_connection_failures_total{phase="connection"} ${metrics.connectionFailures.connection}`,
+    `mayo_connection_failures_total{phase="stall"} ${metrics.connectionFailures.stall}`,
     "",
   ].join("\n");
 };

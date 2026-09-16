@@ -9,6 +9,12 @@ import type { SignalingClient } from "./signaling";
 
 export const LOW_THRESHOLD = 1 * 1024 * 1024;
 
+// WHY: twelve seconds gives ICE gathering, TURN allocation, and trickle
+// signaling several round trips on slower networks, while bounding a
+// first-connection "checking" stall well before a user abandons the room.
+export const FIRST_CONNECTION_STALL_TIMEOUT_MS = 12_000;
+const MAX_RECOVERY_ATTEMPTS = 5;
+
 export type PeerRole = "uploader" | "downloader";
 
 export interface Observable<T> {
@@ -78,6 +84,7 @@ export interface PeerEventMap {
   "ctrl-open": undefined;
   "data-open": undefined;
   "peer-gone": { peerId: string };
+  "ice-stall": { getStats: () => Promise<RTCStatsReport> };
   reconnecting: undefined;
   resuming: undefined;
   exhausted: { error?: Error };
@@ -162,9 +169,10 @@ const makeNonce = (): string => {
 };
 
 /**
- * Owns one WebRTC generation and its recovery ladder. A disconnected ICE
- * state gets three seconds to heal; failed ICE first tries an ICE restart,
- * then replaces the entire peer connection. Five consecutive restart/rebuild
+ * Owns one WebRTC generation and its recovery ladder. A first ICE negotiation
+ * that stalls for twelve seconds escalates to relay; a disconnected ICE state
+ * gets three seconds to heal; failed ICE first tries an ICE restart, then
+ * replaces the entire peer connection. Five consecutive restart/rebuild
  * failures are terminal so a partial transfer can be discarded by its owner.
  */
 class PeerConnectionImpl implements PeerConnection {
@@ -174,6 +182,7 @@ class PeerConnectionImpl implements PeerConnection {
     "ctrl-open": new Set(),
     "data-open": new Set(),
     "peer-gone": new Set(),
+    "ice-stall": new Set(),
     reconnecting: new Set(),
     resuming: new Set(),
     exhausted: new Set(),
@@ -209,6 +218,11 @@ class PeerConnectionImpl implements PeerConnection {
   private disconnectedTimer:
     | ReturnType<typeof globalThis.setTimeout>
     | undefined;
+  private firstConnectionStallTimer:
+    | ReturnType<typeof globalThis.setTimeout>
+    | undefined;
+  private firstConnectionStallHandled = false;
+  private relayEscalated = false;
   private recoveryTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
   private recoveryAttempt = 0;
   private recoveryInFlight = false;
@@ -415,6 +429,7 @@ class PeerConnectionImpl implements PeerConnection {
     if (this.closed || this.configuration === undefined) {
       return;
     }
+    this.clearFirstConnectionStallTimer();
     const previous = this.peerConnection;
     previous?.close();
     this.ctrlProtocol?.dispose();
@@ -426,6 +441,7 @@ class PeerConnectionImpl implements PeerConnection {
     this.remoteCandidates = new RemoteIceCandidateQueue();
     this.localCandidates = [];
     this.offerStarted = false;
+    this.firstConnectionStallHandled = false;
     this.connectionStateValue.value = "connecting";
     this.iceConnectionStateValue.value = "new";
 
@@ -442,6 +458,9 @@ class PeerConnectionImpl implements PeerConnection {
         peerConnection.connectionState === "disconnected" ||
         peerConnection.connectionState === "failed"
       ) {
+        if (peerConnection.connectionState === "failed") {
+          this.clearFirstConnectionStallTimer();
+        }
         this.handleConnectionDrop(peerConnection.connectionState);
       }
     };
@@ -458,6 +477,7 @@ class PeerConnectionImpl implements PeerConnection {
       } else if (peerConnection.iceConnectionState === "disconnected") {
         this.startDisconnectedTimer(peerConnection);
       } else if (peerConnection.iceConnectionState === "failed") {
+        this.clearFirstConnectionStallTimer();
         this.handleConnectionDrop("failed");
       }
     };
@@ -624,6 +644,7 @@ class PeerConnectionImpl implements PeerConnection {
     this.offerStarted = true;
     const offer = await this.peerConnection.createOffer();
     await this.peerConnection.setLocalDescription(offer);
+    this.startFirstConnectionStallWatchdog(this.peerConnection);
     await this.sendLocalDescription();
   }
 
@@ -663,6 +684,7 @@ class PeerConnectionImpl implements PeerConnection {
     if (this.role === "downloader" && description.type === "offer") {
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
+      this.startFirstConnectionStallWatchdog(peerConnection);
       await this.sendLocalDescription();
     }
   }
@@ -726,7 +748,7 @@ class PeerConnectionImpl implements PeerConnection {
     ) {
       return;
     }
-    if (this.recoveryAttempt >= 5) {
+    if (this.recoveryAttempt >= MAX_RECOVERY_ATTEMPTS) {
       this.emitExhausted();
       return;
     }
@@ -763,7 +785,7 @@ class PeerConnectionImpl implements PeerConnection {
       this.rebuildAgainSignal = true;
       return;
     }
-    if (this.recoveryAttempt >= 5) {
+    if (this.recoveryAttempt >= MAX_RECOVERY_ATTEMPTS) {
       this.emitExhausted();
       return;
     }
@@ -871,6 +893,83 @@ class PeerConnectionImpl implements PeerConnection {
     if (this.recoveryTimer !== undefined) {
       globalThis.clearTimeout(this.recoveryTimer);
       this.recoveryTimer = undefined;
+    }
+    this.clearFirstConnectionStallTimer();
+  }
+
+  private startFirstConnectionStallWatchdog(
+    peerConnection: RTCPeerConnection,
+  ): void {
+    if (
+      this.closed ||
+      this.peerConnection !== peerConnection ||
+      this.configuration?.iceTransportPolicy === "relay" ||
+      this.relayEscalated ||
+      peerConnection.iceConnectionState === "connected" ||
+      peerConnection.iceConnectionState === "completed"
+    ) {
+      return;
+    }
+    this.clearFirstConnectionStallTimer();
+    this.firstConnectionStallTimer = globalThis.setTimeout(() => {
+      this.firstConnectionStallTimer = undefined;
+      this.handleFirstConnectionStall(peerConnection);
+    }, FIRST_CONNECTION_STALL_TIMEOUT_MS);
+  }
+
+  private handleFirstConnectionStall(peerConnection: RTCPeerConnection): void {
+    if (
+      this.closed ||
+      this.peerConnection !== peerConnection ||
+      this.firstConnectionStallHandled ||
+      peerConnection.iceConnectionState === "connected" ||
+      peerConnection.iceConnectionState === "completed" ||
+      peerConnection.iceConnectionState === "failed" ||
+      peerConnection.connectionState === "failed"
+    ) {
+      return;
+    }
+    this.firstConnectionStallHandled = true;
+    this.emit("ice-stall", {
+      getStats: () => peerConnection.getStats(),
+    });
+
+    if (this.recoveryAttempt >= MAX_RECOVERY_ATTEMPTS) {
+      this.emitExhausted();
+      return;
+    }
+    if (this.configuration?.iceTransportPolicy === "relay") {
+      return;
+    }
+
+    this.relayEscalated = true;
+    this.configuration = {
+      ...this.configuration,
+      iceTransportPolicy: "relay",
+    };
+    if (!this.signalingOpen || !this.signaling.isOpen) {
+      this.rebuildPending = true;
+      return;
+    }
+    if (this.rebuildInFlight) {
+      this.rebuildAgainPending = true;
+      this.rebuildAgainSignal = true;
+      return;
+    }
+    if (this.recoveryInFlight) {
+      // An existing disconnected/failed recovery owns the current generation;
+      // its pending rebuild will use the relay policy just selected here.
+      return;
+    }
+    void this.scheduleRebuild().catch((error: unknown) =>
+      this.emitError(error),
+    );
+  }
+
+  private clearFirstConnectionStallTimer(): void {
+    if (this.firstConnectionStallTimer !== undefined) {
+      globalThis.clearTimeout(this.firstConnectionStallTimer);
+      this.firstConnectionStallTimer = undefined;
     }
   }
 
