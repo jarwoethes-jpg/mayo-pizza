@@ -107,6 +107,7 @@ type LogFields = {
   peerId?: string;
   ip?: string;
   role?: "uploader" | "downloader";
+  route?: "direct" | "relay";
   phase?: "ice" | "connection" | "stall";
   localCandidateTypes?: string[];
   remoteCandidateTypes?: string[];
@@ -504,6 +505,21 @@ const handleMessage = async (
     }
     if (message.event === "connected") {
       metrics.connections[message.route] += 1;
+      emitLog("connection_established", {
+        peerId: session.id,
+        ip: session.ip,
+        route: message.route,
+        ...(message.localCandidateTypes === undefined
+          ? {}
+          : { localCandidateTypes: message.localCandidateTypes }),
+        ...(message.remoteCandidateTypes === undefined
+          ? {}
+          : { remoteCandidateTypes: message.remoteCandidateTypes }),
+        ...(message.hadRelayCandidate === undefined
+          ? {}
+          : { hadRelayCandidate: message.hadRelayCandidate }),
+        roomCount: rooms.rooms.size,
+      });
     } else {
       metrics.connectionFailures[message.phase] += 1;
       emitLog("connection_failed", {

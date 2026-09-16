@@ -10,6 +10,7 @@ import {
   createBlobSink,
   createSwCreditState,
   detectSinkStrategy,
+  getBlobTooLargeMessage,
   isNextSwSequence,
   matchesOomMarker,
   OOM_MARKER_KEY,
@@ -133,6 +134,12 @@ describe("sink strategy detection", () => {
     expect(() => createBlobSink("allowed.bin", BLOB_MAX_BYTES)).not.toThrow();
     expect(() => createBlobSink("too-large.bin", BLOB_MAX_BYTES + 1)).toThrow(
       /too large/i,
+    );
+  });
+
+  it("uses the shared blob-limit message for oversized downloads", () => {
+    expect(() => createBlobSink("too-large.bin", BLOB_MAX_BYTES + 1)).toThrow(
+      new Error(getBlobTooLargeMessage(BLOB_MAX_BYTES)),
     );
   });
 });

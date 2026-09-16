@@ -578,6 +578,66 @@ describe("transfer cancellation", () => {
     controller.destroy();
   });
 
+  it("reports synchronous sink creation failures without killing the session", () => {
+    const ctrlHandlers = new Map<string, (message: unknown) => void>();
+    const sent: unknown[] = [];
+    const worker = {
+      onmessage: null as ((event: MessageEvent<unknown>) => void) | null,
+      onerror: null as ((event: ErrorEvent) => void) | null,
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    };
+    const peer = {
+      ctrl: {
+        readyState: "open",
+        send: (message: unknown) => sent.push(message),
+      },
+      data: {
+        readyState: "open",
+        bufferedAmount: 0,
+        send: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      },
+      maxMessageSize: undefined,
+      on: () => () => false,
+      onCtrl: (type: string, handler: (message: unknown) => void) => {
+        ctrlHandlers.set(type, handler);
+        return () => ctrlHandlers.delete(type);
+      },
+    };
+    const sinkFailure = new Error(
+      "This file is too large for the browser's in-memory download limit.",
+    );
+    const onAcceptFailed = vi.fn();
+    const onError = vi.fn();
+    const controller = createTransferController("downloader", peer as never, {
+      onAcceptFailed,
+      onError,
+      receiverWorkerFactory: () => worker,
+      sinkFactory: () => {
+        throw sinkFailure;
+      },
+    });
+    const manifest = {
+      t: "manifest" as const,
+      transferId: "transfer-sync-accept-failure",
+      mode: "single" as const,
+      items: [{ path: "file.bin", size: 1, lastModified: 0 }],
+      totalBytes: 1,
+      suggestedName: "file.bin",
+    };
+
+    ctrlHandlers.get("manifest")?.(manifest);
+    controller.acceptTransfer();
+
+    expect(onAcceptFailed).toHaveBeenCalledWith(sinkFailure.message);
+    expect(onError).not.toHaveBeenCalled();
+    expect(worker.terminate).not.toHaveBeenCalled();
+    expect(sent).not.toContainEqual(expect.objectContaining({ t: "error" }));
+    controller.destroy();
+  });
+
   it("waits for final worker chunks before closing the sink", async () => {
     const ctrlHandlers = new Map<string, (message: unknown) => void>();
     const sent: unknown[] = [];

@@ -21,6 +21,7 @@ import {
 import { createPeer, type PeerConnection, type PeerRole } from "./net/peer";
 import {
   classifySelectedRoute,
+  readCandidateTypeStats,
   readSelectedRouteStats,
   type SelectedRoute,
   type SelectedRouteStats,
@@ -37,7 +38,12 @@ import {
   resolveRoomHeartbeatInterval,
   startRoomHeartbeat,
 } from "./roomLifecycle";
-import { getSinkOverride, getSinkStrategy } from "./sink";
+import {
+  blobMaxBytes,
+  getBlobTooLargeMessage,
+  getSinkOverride,
+  getSinkStrategy,
+} from "./sink";
 import { getFailureCopy } from "./ui/copy";
 import { formatBytes, formatEta, formatTransferRate } from "./ui/format";
 import { DONATE_URL, PrivacyPage } from "./ui/legal";
@@ -108,6 +114,18 @@ const getSessionCopy = (
 
 const getTechnicalShareUrl = (slug: string): string =>
   makeRoomShareUrl(window.location.origin, slug);
+
+const getBlobManifestLimitMessage = (
+  manifest: TransferManifestInfo | undefined,
+): string | undefined => {
+  if (manifest === undefined || getSinkStrategy() !== "blob") {
+    return undefined;
+  }
+  const maxBytes = blobMaxBytes();
+  return manifest.totalBytes > maxBytes
+    ? getBlobTooLargeMessage(maxBytes)
+    : undefined;
+};
 
 const formatSelectedRoute = (
   route: SelectedRoute | undefined,
@@ -280,12 +298,21 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
         pendingManifestRef.current = manifest;
         acceptFailedRef.current = false;
         setPendingManifest(manifest);
-        setSessionNotice(undefined);
+        const blobLimitMessage = getBlobManifestLimitMessage(manifest);
+        setSessionNotice(blobLimitMessage);
         setAnnouncement(
-          "A fresh slice just landed. Take a look, then grab it when you’re ready.",
+          blobLimitMessage ??
+            "A fresh slice just landed. Take a look, then grab it when you’re ready.",
         );
+        if (blobLimitMessage !== undefined) {
+          setLog(blobLimitMessage);
+        }
         const override = getSinkOverride();
-        if (override !== undefined && override.autoAccept !== false) {
+        if (
+          blobLimitMessage === undefined &&
+          override !== undefined &&
+          override.autoAccept !== false
+        ) {
           transferRef.current?.acceptTransfer();
         }
       },
@@ -332,7 +359,9 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
         if (manifest !== undefined) {
           setPendingManifest(manifest);
         }
-        setAnnouncement(getFailureCopy(message, role).message);
+        const copy = getFailureCopy(message, role);
+        setSessionNotice(copy.message);
+        setAnnouncement(copy.message);
         setLog(message);
       },
       onCancelled: (reason) => {
@@ -498,13 +527,21 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       routeStatSentRef.current = true;
       void peer
         .getStats()
-        .then((stats) => classifySelectedRoute(stats))
-        .then((route) => {
+        .then((stats) => ({
+          route: classifySelectedRoute(stats),
+          candidateStats: readCandidateTypeStats(stats),
+        }))
+        .then(({ route, candidateStats }) => {
           if (route === undefined) {
             return;
           }
           setSelectedRoute(route);
-          return signaling.send({ t: "stat", event: "connected", route });
+          return signaling.send({
+            t: "stat",
+            event: "connected",
+            route,
+            ...candidateStats,
+          });
         })
         .catch(() => {
           // Route telemetry is deliberately best-effort and never gates a transfer.
@@ -729,6 +766,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
 
   const acceptTransfer = (): void => {
     acceptFailedRef.current = false;
+    setSessionNotice(undefined);
     // This must stay the first call in the click handler: FSA needs the original gesture.
     transferRef.current?.acceptTransfer();
     // Keep the prompt up on failure so the retry carries a fresh gesture.
@@ -741,6 +779,7 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
     transferRef.current?.rejectTransfer();
     pendingManifestRef.current = undefined;
     setPendingManifest(undefined);
+    setSessionNotice(undefined);
   };
 
   const stageFolder = async (collection: FolderCollection): Promise<void> => {
@@ -1018,24 +1057,29 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
       : getPasswordPromptCopy(passwordPromptState);
   const sessionCopy =
     sessionNotice ?? getSessionCopy(sessionStatus, role, sessionFailureReason);
+  const blobLimitMessage = getBlobManifestLimitMessage(pendingManifest);
   const humanCopy =
     passwordPromptCopy !== undefined
       ? passwordPromptCopy.message
-      : pendingManifest !== undefined
-        ? "A fresh slice just landed. Check the details, then grab it when you’re ready."
-        : transferUi.phase === "staged"
-          ? `Nice slice! ${stagedSelection?.name ?? "Your file"} is staged and ready to travel.`
-          : transferUi.phase === "complete"
-            ? "Slice landed! It’s verified and ready to enjoy."
-            : transferUi.phase === "failed"
-              ? failureCopy.message
-              : transferUi.phase === "cancelled"
-                ? getFailureCopy("cancelled", role).message
-                : isVerifying
-                  ? "The slice made it. We’re checking every crumb now."
-                  : transferUi.phase === "transferring"
-                    ? "Your slice is on the move. Keep this tab open while it travels."
-                    : sessionCopy;
+      : sessionNotice !== undefined
+        ? sessionNotice
+        : blobLimitMessage !== undefined
+          ? blobLimitMessage
+          : pendingManifest !== undefined
+            ? "A fresh slice just landed. Check the details, then grab it when you’re ready."
+            : transferUi.phase === "staged"
+              ? `Nice slice! ${stagedSelection?.name ?? "Your file"} is staged and ready to travel.`
+              : transferUi.phase === "complete"
+                ? "Slice landed! It’s verified and ready to enjoy."
+                : transferUi.phase === "failed"
+                  ? failureCopy.message
+                  : transferUi.phase === "cancelled"
+                    ? getFailureCopy("cancelled", role).message
+                    : isVerifying
+                      ? "The slice made it. We’re checking every crumb now."
+                      : transferUi.phase === "transferring"
+                        ? "Your slice is on the move. Keep this tab open while it travels."
+                        : sessionCopy;
   const viewKey =
     passwordPromptState !== undefined
       ? passwordPromptState.view
@@ -1384,14 +1428,35 @@ const RoomView = ({ role, slug }: RoomViewProps) => {
                       files · {pendingManifest.totalBytes} bytes
                     </p>
                   )}
+                  {blobLimitMessage !== undefined && (
+                    <p
+                      className="status-banner"
+                      data-testid="manifest-limit-warning"
+                      id="manifest-limit-warning"
+                      role="alert"
+                    >
+                      <span className="status-banner__label">
+                        Download unavailable
+                      </span>
+                      <span>{blobLimitMessage}</span>
+                    </p>
+                  )}
                   <div className="button-row">
                     <button
+                      aria-describedby={
+                        blobLimitMessage === undefined
+                          ? undefined
+                          : "manifest-limit-warning"
+                      }
                       className="button button--primary"
                       data-testid="accept-transfer"
+                      disabled={blobLimitMessage !== undefined}
                       onClick={acceptTransfer}
                       type="button"
                     >
-                      Grab your slice
+                      {blobLimitMessage === undefined
+                        ? "Grab your slice"
+                        : "Unavailable in this browser"}
                     </button>
                     <button
                       className="button button--ghost"

@@ -42,13 +42,15 @@ export const blobMaxBytes = (
   return isIos ? BLOB_MAX_BYTES_IOS : BLOB_MAX_BYTES;
 };
 
+export const getBlobTooLargeMessage = (maxBytes: number): string => {
+  const maxMegabytes = maxBytes / (1024 * 1024);
+  return `This file is too large for this browser's in-memory download limit of ${maxMegabytes} MB. Open this link in Chrome or Firefox on a desktop to receive it.`;
+};
+
 export const createBlobSink = (name: string, totalBytes: number): Sink => {
   const maxBytes = blobMaxBytes();
   if (totalBytes > maxBytes) {
-    const maxMegabytes = maxBytes / (1024 * 1024);
-    throw new Error(
-      `This file is too large for this browser's in-memory download limit of ${maxMegabytes} MB. Open this link in Chrome or Firefox on a desktop to receive it.`,
-    );
+    throw new Error(getBlobTooLargeMessage(maxBytes));
   }
 
   const chunks: BlobPart[] = [];

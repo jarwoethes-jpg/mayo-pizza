@@ -189,6 +189,7 @@ export {
   BLOB_MAX_BYTES_IOS,
   blobMaxBytes,
   createBlobSink,
+  getBlobTooLargeMessage,
 } from "./blob";
 export {
   isSwNoConsumerStallError,

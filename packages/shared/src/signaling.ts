@@ -81,6 +81,9 @@ export const signalingMessageSchema = z.union([
         t: z.literal("stat"),
         event: z.literal("connected"),
         route: z.enum(["direct", "relay"]),
+        localCandidateTypes: candidateTypesSchema.optional(),
+        remoteCandidateTypes: candidateTypesSchema.optional(),
+        hadRelayCandidate: z.boolean().optional(),
       })
       .strict(),
     z

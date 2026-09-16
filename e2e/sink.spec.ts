@@ -415,7 +415,12 @@ test.describe("streaming download sinks", () => {
       await expect(second.receiver.getByTestId("accept-transfer")).toBeVisible({
         timeout: 15_000,
       });
-      await second.receiver.getByTestId("accept-transfer").click();
+      await expect(
+        second.receiver.getByTestId("manifest-limit-warning"),
+      ).toContainText(/too large/i);
+      await expect(
+        second.receiver.getByTestId("accept-transfer"),
+      ).toBeDisabled();
       await expect(second.receiver.getByTestId("log")).toContainText(
         /too large/i,
       );

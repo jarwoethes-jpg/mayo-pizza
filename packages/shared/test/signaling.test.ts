@@ -112,6 +112,23 @@ const invalidMessages = [
 ] as const;
 
 describe("signalingMessageSchema", () => {
+  it("accepts candidate diagnostics on connected stats while remaining strict", () => {
+    const message = {
+      t: "stat",
+      event: "connected",
+      route: "direct",
+      localCandidateTypes: ["host", "srflx"],
+      remoteCandidateTypes: ["host"],
+      hadRelayCandidate: false,
+    } as const;
+
+    expect(signalingMessageSchema.parse(message)).toEqual(message);
+    expect(
+      signalingMessageSchema.safeParse({ ...message, unexpected: true })
+        .success,
+    ).toBe(false);
+  });
+
   it.each(validMessages)(
     "accepts and round-trips the $t variant",
     (message) => {

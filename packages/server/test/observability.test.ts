@@ -384,6 +384,96 @@ describe("observability endpoints", () => {
     }
   });
 
+  it("records established WebRTC connection stats and optional candidate diagnostics", async () => {
+    vi.stubEnv("LOG_LEVEL", "info");
+    vi.stubEnv("METRICS_TOKEN", "metrics-secret");
+    const logs: string[] = [];
+    const logStream = new Writable({
+      write(chunk, _encoding, callback) {
+        logs.push(chunk.toString());
+        callback();
+      },
+    });
+    const server = createServer({ logStream });
+
+    try {
+      const uploader = createFakeSocket();
+      const downloader = createFakeSocket();
+      connectFakeSocket(server, uploader);
+      connectFakeSocket(server, downloader);
+      uploader.emitMessage({ t: "create" });
+      const created = await waitForFrame(
+        uploader,
+        (frame) => frame.t === "created",
+      );
+      if (typeof created.slug !== "string") {
+        throw new Error("The fake create flow did not return a slug.");
+      }
+      downloader.emitMessage({ t: "join", slug: created.slug });
+      const joined = await waitForFrame(
+        downloader,
+        (frame) => frame.t === "joined",
+      );
+
+      downloader.emitMessage({
+        t: "stat",
+        event: "connected",
+        route: "direct",
+        localCandidateTypes: ["host", "srflx"],
+        remoteCandidateTypes: ["host"],
+        hadRelayCandidate: true,
+      });
+      downloader.emitMessage({
+        t: "stat",
+        event: "connected",
+        route: "relay",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const response = await server.app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: { authorization: "Bearer metrics-secret" },
+      });
+      expect(response.body).toContain(
+        'mayo_connections_total{route="direct"} 1',
+      );
+      expect(response.body).toContain(
+        'mayo_connections_total{route="relay"} 1',
+      );
+
+      const connectionLogs = logs
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((line) => line.event === "connection_established");
+      expect(connectionLogs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            peerId: joined.peerId,
+            ip: "127.0.0.1",
+            route: "direct",
+            roomCount: 1,
+            localCandidateTypes: ["host", "srflx"],
+            remoteCandidateTypes: ["host"],
+            hadRelayCandidate: true,
+          }),
+          expect.objectContaining({
+            peerId: joined.peerId,
+            ip: "127.0.0.1",
+            route: "relay",
+            roomCount: 1,
+          }),
+        ]),
+      );
+      const relayLog = connectionLogs.find((line) => line.route === "relay");
+      expect(relayLog).toBeDefined();
+      expect(relayLog).not.toHaveProperty("localCandidateTypes");
+      expect(relayLog).not.toHaveProperty("remoteCandidateTypes");
+      expect(relayLog).not.toHaveProperty("hadRelayCandidate");
+    } finally {
+      await server.close();
+    }
+  });
+
   it("keeps token and password failure counters and events separate", async () => {
     vi.stubEnv("LOG_LEVEL", "info");
     vi.stubEnv("METRICS_TOKEN", "metrics-secret");
